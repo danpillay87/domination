@@ -294,3 +294,7 @@ export function shake(mag: number, dur = 0.6): void {
   shakeMag = mag;
   shakeT = dur;
 }
+
+export function setCrt(on: boolean): void {
+  crtPass.enabled = on;
+}

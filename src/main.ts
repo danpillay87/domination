@@ -1,16 +1,16 @@
 import { ROUNDS, dollars } from './countries';
-import { initInput, keys, mouse, consumeFire, key, rumble } from './input';
+import { initInput, mouse, consumeFire, consumePresses, key, rumble, pollPad } from './input';
 import {
   newDuel, step, mulberry32,
   type DuelState, type Side, type SideInputs,
 } from './sim';
 import { Largo, TAUNTS, pick } from './ai';
 import {
-  initRender, showAttract, buildRound, drawFrame, ndcToWorld, shake, resize, setIntro,
+  initRender, showAttract, buildRound, drawFrame, ndcToWorld, shake, resize, setIntro, setCrt,
 } from './render';
 import {
   initAudio, sfx, startDrone, stopDrone, startAlarm, stopAlarm, announce,
-  startMusic, stopMusic,
+  startMusic, stopMusic, setMuted,
 } from './audio';
 
 type Phase = 'attract' | 'intro' | 'duel' | 'shock' | 'over';
@@ -38,7 +38,7 @@ let endurance: Record<Side, number> = { p: 100, l: 100 };
 let duel: DuelState | null = null;
 let largo: Largo | null = null;
 let rng = mulberry32(7);
-let prevKeys = new Set<string>();
+let presses = new Set<string>();
 let shock: {
   victim: Side;
   drain: number;
@@ -51,9 +51,33 @@ let matchWon = false;
 let warnT = 0; // "missile inbound" banner countdown
 let prevLargoAmmo = 2;
 let lastBeepSecond = -1;
+let quipShown = false;
+
+// Attract: cycle title globe ↔ AI-vs-AI demonstration, like a real cabinet.
+let attractMode: 'title' | 'demo' = 'title';
+let demo: { duel: DuelState; aiP: Largo; aiL: Largo; rng: () => number } | null = null;
+
+// Gamepad reticle lives in world coords; last-moved device owns the reticle.
+const padRet = { x: 0, y: 0 };
+let lastDevice: 'mouse' | 'pad' = 'mouse';
+let currentReticle: { x: number; y: number } | null = null;
+
+const settings: { muted: boolean; crt: boolean } = (() => {
+  try {
+    return { muted: false, crt: true, ...JSON.parse(localStorage.getItem('dom.settings') ?? '{}') };
+  } catch {
+    return { muted: false, crt: true };
+  }
+})();
+
+function saveSettings(): void {
+  try {
+    localStorage.setItem('dom.settings', JSON.stringify(settings));
+  } catch {}
+}
 
 function pressed(k: string): boolean {
-  return keys.has(k) && !prevKeys.has(k);
+  return presses.has(k);
 }
 
 function setPhase(p: Phase): void {
@@ -73,14 +97,29 @@ function startMatch(): void {
   cash = { p: 0, l: 0 };
   endurance = { p: 100, l: 100 };
   matchWon = false;
+  demo = null;
+  attractMode = 'title';
+  ui.flash.style.background = '#ff2200';
+  ui.flash.style.opacity = '0';
   rng = mulberry32((Math.random() * 1e9) | 0); // match seed; sim itself stays deterministic per seed
   startRound();
+}
+
+function makeDemo(): void {
+  const seed = mulberry32((Math.random() * 1e9) | 0);
+  demo = {
+    duel: newDuel(ROUNDS[0], 1, seed),
+    aiP: new Largo('p', 1, seed),
+    aiL: new Largo('l', 1, seed),
+    rng: seed,
+  };
+  buildRound(demo.duel.outline);
 }
 
 function startRound(): void {
   const r = ROUNDS[roundIdx];
   duel = newDuel(r, roundIdx, rng);
-  largo = new Largo(roundIdx, rng);
+  largo = new Largo('l', roundIdx, rng);
   buildRound(duel.outline);
   showAttract(false);
   ui.center.textContent = r.name;
@@ -93,6 +132,7 @@ function startRound(): void {
   warnT = 0;
   prevLargoAmmo = 2;
   lastBeepSecond = -1;
+  quipShown = false;
   setIntro(0);
   setPhase('intro');
 }
@@ -170,14 +210,53 @@ function afterShock(): void {
 
 function tick(dt: number): void {
   phaseT += dt;
+  presses = new Set(consumePresses());
+
+  if (pressed('m')) {
+    settings.muted = !settings.muted;
+    setMuted(settings.muted);
+    saveSettings();
+  }
+  if (pressed('c')) {
+    settings.crt = !settings.crt;
+    setCrt(settings.crt);
+    saveSettings();
+  }
 
   switch (phase) {
     case 'attract': {
-      ui.center.textContent = 'DOMINATION';
-      ui.sub.textContent = 'PRESS ENTER';
-      ui.taunt.textContent = '';
-      ui.help.textContent = 'A GAME OF POWER · THE LOSER FEELS PAIN · SPAIN $9,000 — THE WORLD $325,000';
-      ui.marquee.innerHTML = '';
+      if (attractMode === 'title') {
+        ui.center.textContent = 'DOMINATION';
+        ui.sub.textContent = 'PRESS ENTER';
+        ui.taunt.textContent = '';
+        ui.help.textContent =
+          'A GAME OF POWER · THE LOSER FEELS PAIN · M: MUTE · C: CRT · SPAIN $9,000 — THE WORLD $325,000';
+        ui.marquee.innerHTML = '';
+        if (phaseT > 9) {
+          makeDemo();
+          showAttract(false);
+          attractMode = 'demo';
+          setPhase('attract');
+        }
+      } else if (demo) {
+        ui.center.textContent = '';
+        ui.sub.textContent = 'DEMONSTRATION — PRESS ENTER';
+        const inputs: Record<Side, SideInputs> = {
+          p: demo.aiP.think(demo.duel),
+          l: demo.aiL.think(demo.duel),
+        };
+        step(demo.duel, SIM_DT, inputs, 1, demo.rng);
+        const left = Math.max(0, demo.duel.duration - demo.duel.time);
+        ui.marquee.innerHTML =
+          `SPAIN — ${dollars(9000)}` +
+          `<span class="stake">DEMO ${demo.duel.strikes.p} — ${demo.duel.strikes.l} · ${left.toFixed(0)}s</span>`;
+        if (demo.duel.over || phaseT > 30) {
+          demo = null;
+          attractMode = 'title';
+          showAttract(true);
+          setPhase('attract');
+        }
+      }
       if (pressed('enter')) {
         initAudio();
         startMatch();
@@ -192,13 +271,28 @@ function tick(dt: number): void {
     case 'duel': {
       if (!duel || !largo) break;
       const r = ROUNDS[roundIdx];
-      const fire = consumeFire();
+      const pad = pollPad();
+      if (mouse.moved) {
+        mouse.moved = false;
+        lastDevice = 'mouse';
+      }
+      if (pad.aimDX || pad.aimDY) {
+        lastDevice = 'pad';
+        padRet.x = Math.max(-1.3, Math.min(1.3, padRet.x + pad.aimDX * 2.4 * SIM_DT));
+        padRet.y = Math.max(-1.0, Math.min(1.0, padRet.y + pad.aimDY * 2.4 * SIM_DT));
+      }
       const w = ndcToWorld(mouse.x, mouse.y);
+      currentReticle = lastDevice === 'pad' ? { x: padRet.x, y: padRet.y } : w;
+      const fire = consumeFire();
       const pInputs: SideInputs = {
-        shieldDir: (key('d') || key('arrowright') ? 1 : 0) + (key('a') || key('arrowleft') ? -1 : 0),
-        fireAt: fire ? { x: w.x, y: w.y } : null,
-        launch: pressed('1') || pressed('2') || pressed('e'),
+        shieldDir:
+          (key('d') || key('arrowright') ? 1 : 0) +
+          (key('a') || key('arrowleft') ? -1 : 0) +
+          pad.shieldDir,
+        fireAt: fire ? { x: w.x, y: w.y } : pad.fire ? { x: padRet.x, y: padRet.y } : null,
+        launch: pressed('1') || pressed('2') || pressed('e') || pad.launch,
       };
+      pInputs.shieldDir = Math.max(-1, Math.min(1, pInputs.shieldDir));
       const inputs: Record<Side, SideInputs> = { p: pInputs, l: largo.think(duel) };
       step(duel, SIM_DT, inputs, roundIdx, rng);
 
@@ -226,6 +320,11 @@ function tick(dt: number): void {
         if (warnT <= 0) ui.center.textContent = '';
       }
 
+      if (!quipShown && duel.time > 18 && warnT <= 0) {
+        quipShown = true;
+        ui.taunt.textContent = pick(TAUNTS.duel, rng);
+      }
+
       const left = Math.max(0, duel.duration - duel.time);
       if (left <= 5.4 && Math.floor(left) !== lastBeepSecond) {
         lastBeepSecond = Math.floor(left);
@@ -246,7 +345,8 @@ function tick(dt: number): void {
       const rate = shock.drain / shock.dur;
 
       if (shock.victim === 'p') {
-        if (!key(' ') && shock.t > 0.25) shock.outcome = 'release';
+        const gripping = key(' ') || pollPad().grip;
+        if (!gripping && shock.t > 0.25) shock.outcome = 'release';
         endurance.p -= rate * dt;
         if (endurance.p <= 0) shock.outcome = 'collapse';
         ui.flash.style.opacity = String(0.25 + 0.3 * Math.abs(Math.sin(shock.t * 26)));
@@ -285,7 +385,6 @@ function tick(dt: number): void {
   }
 
   fmtCash();
-  prevKeys = new Set(keys);
 }
 
 // --- bootstrap ---
@@ -293,6 +392,8 @@ const canvas = document.getElementById('game') as HTMLCanvasElement;
 initRender(canvas);
 initInput(canvas, () => initAudio());
 showAttract(true);
+setMuted(settings.muted);
+setCrt(settings.crt);
 fmtCash();
 
 let last = performance.now();
@@ -305,8 +406,14 @@ function pump(now: number): void {
     tick(SIM_DT);
     acc -= SIM_DT;
   }
-  const reticle = phase === 'duel' ? ndcToWorld(mouse.x, mouse.y) : null;
-  drawFrame(phase === 'duel' || phase === 'shock' || phase === 'intro' ? duel : null, reticle, dt);
+  const reticle = phase === 'duel' ? currentReticle : null;
+  const simToDraw =
+    phase === 'duel' || phase === 'shock' || phase === 'intro'
+      ? duel
+      : phase === 'attract' && demo
+        ? demo.duel
+        : null;
+  drawFrame(simToDraw, reticle, dt);
 }
 function frame(now: number): void {
   pump(now);
@@ -326,5 +433,8 @@ resize();
   get duel() { return duel; },
   get cash() { return cash; },
   get endurance() { return endurance; },
+  get attractMode() { return attractMode; },
+  get demo() { return demo; },
+  get settings() { return settings; },
   skipToEnd() { if (duel) duel.time = duel.duration - 0.3; },
 };

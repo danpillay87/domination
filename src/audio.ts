@@ -7,6 +7,8 @@ let master: GainNode | null = null;
 let droneNodes: AudioScheduledSourceNode[] = [];
 let alarmTimer: number | null = null;
 
+let muted = false;
+
 export function initAudio(): void {
   if (ctx) return;
   ctx = new AudioContext();
@@ -17,8 +19,18 @@ export function initAudio(): void {
   comp.attack.value = 0.003;
   comp.release.value = 0.2;
   master = ctx.createGain();
-  master.gain.value = 0.35;
+  master.gain.value = muted ? 0 : 0.35;
   master.connect(comp).connect(ctx.destination);
+}
+
+export function setMuted(b: boolean): void {
+  muted = b;
+  if (master) master.gain.value = b ? 0 : 0.35;
+  if (b) {
+    try {
+      speechSynthesis.cancel();
+    } catch {}
+  }
 }
 
 function env(
@@ -189,6 +201,7 @@ export function stopAlarm(): void {
 }
 
 export function announce(text: string): void {
+  if (muted) return;
   try {
     const u = new SpeechSynthesisUtterance(text);
     u.rate = 0.88;
