@@ -13,7 +13,7 @@ import {
   startMusic, stopMusic, setMuted,
 } from './audio';
 import { initHaptics, phoneConnected, phoneHeld, sendShock } from './haptics';
-import { netInit, netOn, netSend, type NetMsg } from './net';
+import { netInit, netOn, netSend, netMode, netReady, type NetMsg } from './net';
 import QRCode from 'qrcode';
 
 type Phase = 'attract' | 'intro' | 'duel' | 'shock' | 'over';
@@ -67,12 +67,14 @@ let currentReticle: { x: number; y: number } | null = null;
 
 // Multiplayer: lockstep over the relay. Host plays 007 (bottom), guest plays
 // LARGO's seat (top). Inputs for tick T are exchanged at T - INPUT_DELAY.
-const INPUT_DELAY = 4;
+const INPUT_DELAY = 8; // ticks of input latency budget — covers cloud-relay RTT + send cadence
+const REDUNDANCY = 12; // each input message carries this many trailing ticks — heals dropped messages
 let mp: { role: 'host' | 'guest'; mySide: Side; seed: number } | null = null;
 let mpWait: 'hosting' | 'joining' | null = null;
 let mpHelloTimer: number | null = null;
 let duelTick = 0;
 let stallT = 0;
+let stallResendAt = 0;
 const inBuf: Record<Side, Map<number, SideInputs>> = { p: new Map(), l: new Map() };
 let mpShockResult: { outcome: 'release' | 'collapse' | 'endured'; endurance: number } | null = null;
 const mySums = new Map<number, number>();
@@ -114,6 +116,16 @@ function leaveMp(): void {
   mp = null;
   mpWait = null;
   stopHello();
+}
+
+// Lockstep over a lossy broadcast channel: every message carries the last
+// REDUNDANCY ticks of our inputs, so any single drop is healed by the next.
+function sendInputWindow(target: number): void {
+  if (!mp) return;
+  const from = Math.max(0, target - (REDUNDANCY - 1));
+  const ins: SideInputs[] = [];
+  for (let t = from; t <= target; t++) ins.push(inBuf[mp.mySide].get(t) ?? NEUTRAL);
+  netSend({ t: 'mp-in', sid: mp.seed, side: mp.mySide, from, ins });
 }
 
 const settings: { muted: boolean; crt: boolean } = (() => {
@@ -317,7 +329,9 @@ function tick(dt: number): void {
               : 'PRESS ENTER';
         ui.taunt.textContent = '';
         ui.help.textContent =
-          'ENTER: VS LARGO · O: HOST TABLE · J: JOIN TABLE · M: MUTE · C: CRT · THE LOSER FEELS PAIN';
+          `ENTER: VS LARGO · O: HOST TABLE · J: JOIN TABLE · M: MUTE · C: CRT · LINK: ${
+            netMode() === 'supabase' ? (netReady() ? 'GLOBAL ◉' : 'GLOBAL …') : 'LOCAL RELAY'
+          }`;
         ui.marquee.innerHTML = '';
         $('joinInfo').style.display = 'flex';
         if (!mpWait && phaseT > 9) {
@@ -415,12 +429,18 @@ function tick(dt: number): void {
         const target = duelTick + INPUT_DELAY;
         if (!inBuf[mp.mySide].has(target)) {
           inBuf[mp.mySide].set(target, myIn);
-          netSend({ t: 'mp-in', side: mp.mySide, tick: target, in: myIn });
+          // Send every other tick — halves message rate; redundancy covers the gap.
+          if (target % 2 === 0) sendInputWindow(target);
         }
         const a = inBuf.p.get(duelTick);
         const b = inBuf.l.get(duelTick);
         if (!a || !b) {
           stallT += dt;
+          // Keep re-broadcasting our window while stalled or a mutual stall deadlocks.
+          if (stallT > stallResendAt) {
+            sendInputWindow(target);
+            stallResendAt = stallT + 0.3;
+          }
           if (stallT > 0.6) ui.sub.textContent = 'AWAITING OPPONENT';
           if (stallT > 20) {
             finishMatch(true, 'OPPONENT CONNECTION LOST');
@@ -430,19 +450,23 @@ function tick(dt: number): void {
         }
         if (stallT > 0.6) ui.sub.textContent = '';
         stallT = 0;
+        stallResendAt = 0;
         inputs = { p: a, l: b };
-        inBuf.p.delete(duelTick);
-        inBuf.l.delete(duelTick);
       } else {
         inputs = { p: myIn, l: largo.think(duel) };
       }
       step(duel, SIM_DT, inputs, roundIdx, rng);
       duelTick++;
+      if (mp && duelTick % 120 === 0) {
+        for (const buf of [inBuf.p, inBuf.l]) {
+          for (const k of buf.keys()) if (k < duelTick - 60) buf.delete(k);
+        }
+      }
       if (mp && duelTick % 300 === 0 && duel && !duel.over) {
         const sum =
           duel.strikes.p * 1e6 + duel.strikes.l * 1e3 + duel.missiles.length * 10 + duel.targets.length;
         mySums.set(duelTick, sum);
-        netSend({ t: 'mp-sum', tick: duelTick, sum });
+        netSend({ t: 'mp-sum', sid: mp.seed, tick: duelTick, sum });
         for (const k of mySums.keys()) if (k < duelTick - 1200) mySums.delete(k);
       }
 
@@ -510,7 +534,11 @@ function tick(dt: number): void {
         }
         if (shock.t >= shock.dur && !shock.outcome) shock.outcome = 'endured';
         if (mp && shock.outcome) {
-          netSend({ t: 'mp-shock', outcome: shock.outcome, endurance: endurance[s] });
+          // Repeat the verdict — a single lost message must not desync the match result.
+          const verdict = { t: 'mp-shock', sid: mp.seed, outcome: shock.outcome, endurance: endurance[s] };
+          netSend(verdict);
+          setTimeout(() => netSend(verdict), 400);
+          setTimeout(() => netSend(verdict), 900);
         }
       } else {
         endurance[shock.victim] -= rate * dt;
@@ -582,6 +610,9 @@ netOn((m: NetMsg) => {
         const seed = (Math.random() * 1e9) | 0;
         netSend({ t: 'mp-start', seed });
         beginMpMatch('host', seed);
+      } else if (mp && mp.role === 'host' && phase !== 'over') {
+        // Guest missed the first mp-start (lossy channel) — repeat it.
+        netSend({ t: 'mp-start', seed: mp.seed });
       }
       break;
     }
@@ -593,13 +624,20 @@ netOn((m: NetMsg) => {
     }
     case 'mp-in': {
       const side = m.side as Side;
-      if (mp && side !== mp.mySide && (side === 'p' || side === 'l') && typeof m.tick === 'number') {
-        inBuf[side].set(m.tick, m.in as SideInputs);
+      if (
+        mp && m.sid === mp.seed &&
+        side !== mp.mySide && (side === 'p' || side === 'l') &&
+        typeof m.from === 'number' && Array.isArray(m.ins)
+      ) {
+        for (let i = 0; i < m.ins.length; i++) {
+          const tk = m.from + i;
+          if (!inBuf[side].has(tk)) inBuf[side].set(tk, m.ins[i] as SideInputs);
+        }
       }
       break;
     }
     case 'mp-shock': {
-      if (mp && typeof m.endurance === 'number') {
+      if (mp && m.sid === mp.seed && typeof m.endurance === 'number') {
         mpShockResult = {
           outcome: m.outcome as 'release' | 'collapse' | 'endured',
           endurance: m.endurance,
@@ -608,7 +646,7 @@ netOn((m: NetMsg) => {
       break;
     }
     case 'mp-sum': {
-      if (mp && typeof m.tick === 'number' && typeof m.sum === 'number') {
+      if (mp && m.sid === mp.seed && typeof m.tick === 'number' && typeof m.sum === 'number') {
         const mine = mySums.get(m.tick);
         if (mine !== undefined && mine !== m.sum) {
           ui.taunt.textContent = 'SYNC DRIFT DETECTED — RESULT MAY DIVERGE';
