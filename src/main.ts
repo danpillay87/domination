@@ -11,7 +11,7 @@ import {
 } from './render';
 import {
   initAudio, sfx, startDrone, stopDrone, startAlarm, stopAlarm, announce,
-  startMusic, stopMusic, setMuted,
+  startMusic, stopMusic, startTitleMusic, stopTitleMusic, setMuted,
 } from './audio';
 import { initHaptics, phoneConnected, phoneHeld, sendShock } from './haptics';
 import { netInit, netOn, netSend, netJoin, netLeave, netMode, type NetMsg } from './net';
@@ -57,6 +57,7 @@ let duel: DuelState | null = null;
 let largo: Largo | null = null;
 let rng = mulberry32(7);
 let presses = new Set<string>();
+let pressSeq: string[] = []; // ordered, duplicates kept — text entry needs both
 let shock: {
   victim: Side;
   drain: number;
@@ -108,7 +109,7 @@ function my(): Side {
 }
 
 function oppName(): string {
-  return mp ? 'YOUR OPPONENT' : 'LARGO';
+  return mp ? names[my() === 'p' ? 'l' : 'p'] : 'LARGO';
 }
 
 const NEUTRAL: SideInputs = { shieldDir: 0, fireAt: null, launch: false };
@@ -118,10 +119,13 @@ function stopHello(): void {
   mpHelloTimer = null;
 }
 
-function beginMpMatch(role: 'host' | 'guest', seed: number): void {
+function beginMpMatch(role: 'host' | 'guest', seed: number, opponentName?: string): void {
   stopHello();
   mpWait = null;
   mp = { role, mySide: role === 'host' ? 'p' : 'l', seed };
+  if (role === 'host') names = { p: playerName, l: (opponentName || 'CHALLENGER').slice(0, 8) };
+  else names = { p: (opponentName || 'HOST').slice(0, 8), l: playerName };
+  setEnduranceTags();
   initAudio();
   roundIdx = 0;
   cash = { p: 0, l: 0 };
@@ -156,6 +160,25 @@ function sendInputWindow(target: number): void {
 
 let gripInfoOk = false;
 
+// Player identity — arcade name entry, persisted. Sign-in can layer on later.
+let playerName: string = (() => {
+  try {
+    return (localStorage.getItem('dom.name') || '007').slice(0, 8);
+  } catch {
+    return '007';
+  }
+})();
+let names: Record<Side, string> = { p: '007', l: 'LARGO' };
+let naming = false;
+let nameBuf = '';
+
+function setEnduranceTags(): void {
+  const tp = document.querySelector('#endP .tag');
+  const tl = document.querySelector('#endL .tag');
+  if (tp) tp.textContent = `${names.p} — ENDURANCE`;
+  if (tl) tl.textContent = `${names.l} — ENDURANCE`;
+}
+
 const settings: { muted: boolean; crt: boolean } = (() => {
   try {
     return { muted: false, crt: true, ...JSON.parse(localStorage.getItem('dom.settings') ?? '{}') };
@@ -181,8 +204,8 @@ function setPhase(p: Phase): void {
 
 const shown = { endP: -1, endL: -1 };
 function fmtCash(): void {
-  setHTML(ui.cashP, `<span class="label">007</span>${dollars(cash.p)}`);
-  setHTML(ui.cashL, `<span class="label">LARGO</span>${dollars(cash.l)}`);
+  setHTML(ui.cashP, `<span class="label">${names.p}</span>${dollars(cash.p)}`);
+  setHTML(ui.cashL, `<span class="label">${names.l}</span>${dollars(cash.l)}`);
   const ep = Math.max(0, Math.round(endurance.p * 2) / 2);
   const el = Math.max(0, Math.round(endurance.l * 2) / 2);
   if (ep !== shown.endP) {
@@ -198,6 +221,8 @@ function fmtCash(): void {
 function startMatch(): void {
   mpWait = null;
   stopHello();
+  names = { p: playerName, l: 'LARGO' };
+  setEnduranceTags();
   roundIdx = 0;
   cash = { p: 0, l: 0 };
   endurance = { p: 100, l: 100 };
@@ -225,6 +250,7 @@ function makeDemo(): void {
 }
 
 function startRound(): void {
+  stopTitleMusic();
   $('joinInfo').style.display = 'none';
   const r = matchRounds[roundIdx];
   duel = newDuel(r, roundIdx, rng, !!mp);
@@ -344,9 +370,10 @@ function afterShock(): void {
 
 function tick(dt: number): void {
   phaseT += dt;
-  presses = new Set(consumePresses());
+  pressSeq = consumePresses();
+  presses = new Set(pressSeq);
 
-  if (mpWait !== 'entering') {
+  if (mpWait !== 'entering' && !naming) {
     if (pressed('m')) {
       settings.muted = !settings.muted;
       setMuted(settings.muted);
@@ -361,28 +388,31 @@ function tick(dt: number): void {
 
   switch (phase) {
     case 'attract': {
+      startTitleMusic(); // no-op until the audio context exists (first interaction)
       if (attractMode === 'title') {
         setTxt(ui.center, 'DOMINATION');
         setTxt(
           ui.sub,
-          mpWait === 'hosting'
-            ? `TABLE ${tableCode} — TELL YOUR CHALLENGER THE CODE`
-            : mpWait === 'entering'
-              ? `ENTER TABLE CODE: ${codeBuf}${'·'.repeat(4 - codeBuf.length)}`
-              : mpWait === 'joining'
-                ? `SEEKING TABLE ${codeBuf}…`
-                : 'PRESS ENTER',
+          naming
+            ? `YOUR NAME: ${nameBuf}_`
+            : mpWait === 'hosting'
+              ? `TABLE ${tableCode} — TELL YOUR CHALLENGER THE CODE`
+              : mpWait === 'entering'
+                ? `ENTER TABLE CODE: ${codeBuf}${'·'.repeat(4 - codeBuf.length)}`
+                : mpWait === 'joining'
+                  ? `SEEKING TABLE ${codeBuf}…`
+                  : 'PRESS ENTER',
         );
         setTxt(ui.taunt, '');
         setTxt(
           ui.help,
-          `ENTER: VS LARGO · O: HOST TABLE · J: JOIN TABLE · M: MUTE · C: CRT · LINK: ${
+          `ENTER: VS LARGO · O: HOST · J: JOIN · N: NAME (${playerName}) · M: MUTE · C: CRT · LINK: ${
             netMode() === 'supabase' ? 'GLOBAL ◉' : 'LOCAL RELAY'
           }`,
         );
         setHTML(ui.marquee, '');
         $('joinInfo').style.display = gripInfoOk ? 'flex' : 'none';
-        if (!mpWait && phaseT > 9) {
+        if (!mpWait && !naming && phaseT > 9) {
           makeDemo();
           showAttract(false);
           attractMode = 'demo';
@@ -410,9 +440,25 @@ function tick(dt: number): void {
           setPhase('attract');
         }
       }
+      // Name entry captures the keyboard.
+      if (naming) {
+        for (const k of pressSeq) {
+          if (/^[a-z0-9]$/.test(k) && nameBuf.length < 8) nameBuf += k.toUpperCase();
+          else if (k === 'backspace') nameBuf = nameBuf.slice(0, -1);
+          else if (k === 'enter') {
+            playerName = nameBuf || '007';
+            try {
+              localStorage.setItem('dom.name', playerName);
+            } catch {}
+            naming = false;
+          } else if (k === 'escape') naming = false;
+        }
+        break;
+      }
+
       // Code entry captures the keyboard; other lobby keys are suspended.
       if (mpWait === 'entering') {
-        for (const k of presses) {
+        for (const k of pressSeq) {
           if (/^[a-z]$/.test(k) && codeBuf.length < 4) codeBuf += k.toUpperCase();
           else if (k === 'backspace') codeBuf = codeBuf.slice(0, -1);
           else if (k === 'escape') {
@@ -424,21 +470,26 @@ function tick(dt: number): void {
           netJoin(codeBuf);
           mpWait = 'joining';
           stopHello();
-          netSend({ t: 'mp-hello' });
-          mpHelloTimer = window.setInterval(() => netSend({ t: 'mp-hello' }), 1200);
+          netSend({ t: 'mp-hello', name: playerName });
+          mpHelloTimer = window.setInterval(() => netSend({ t: 'mp-hello', name: playerName }), 1200);
         }
         break;
       }
 
       // Lobby keys work from the title AND mid-demonstration.
-      if (pressed('o') || pressed('j') || pressed('escape')) {
+      if (pressed('o') || pressed('j') || pressed('escape') || pressed('n')) {
         if (attractMode === 'demo') {
           demo = null;
           attractMode = 'title';
           showAttract(true);
           setPhase('attract');
         }
-        if (pressed('o')) {
+        if (pressed('n')) {
+          if (!mpWait) {
+            naming = true;
+            nameBuf = playerName === '007' ? '' : playerName;
+          }
+        } else if (pressed('o')) {
           if (mpWait === 'hosting') {
             mpWait = null;
             netLeave();
@@ -582,7 +633,7 @@ function tick(dt: number): void {
       setHTML(
         ui.marquee,
         `${r.name} — ${dollars(r.stake)}` +
-          `<span class="stake">${ammo} 007 ${duel.strikes.p} — ${duel.strikes.l} LARGO ${ammoL} · ${left.toFixed(0)}s</span>`,
+          `<span class="stake">${ammo} ${names.p} ${duel.strikes.p} — ${duel.strikes.l} ${names.l} ${ammoL} · ${left.toFixed(0)}s</span>`,
       );
 
       if (duel.over && duel.loser) endRound(duel.loser, duel.reason);
@@ -682,17 +733,17 @@ netOn((m: NetMsg) => {
     case 'mp-hello': {
       if (mpWait === 'hosting' && phase === 'attract') {
         const seed = (Math.random() * 1e9) | 0;
-        netSend({ t: 'mp-start', seed });
-        beginMpMatch('host', seed);
+        netSend({ t: 'mp-start', seed, name: playerName });
+        beginMpMatch('host', seed, typeof m.name === 'string' ? m.name : undefined);
       } else if (mp && mp.role === 'host' && phase !== 'over') {
         // Guest missed the first mp-start (lossy channel) — repeat it.
-        netSend({ t: 'mp-start', seed: mp.seed });
+        netSend({ t: 'mp-start', seed: mp.seed, name: playerName });
       }
       break;
     }
     case 'mp-start': {
       if (mpWait === 'joining' && typeof m.seed === 'number') {
-        beginMpMatch('guest', m.seed);
+        beginMpMatch('guest', m.seed, typeof m.name === 'string' ? m.name : undefined);
       }
       break;
     }

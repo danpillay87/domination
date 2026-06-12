@@ -133,6 +133,43 @@ export function stopMusic(): void {
   musicTimer = null;
 }
 
+// Title theme — original 8-bar loop: Am / F / Dm / E around A2, kick on the
+// downbeats, offbeat hats, octave-lifting bass, chord-tone arp on 16ths.
+const TITLE_PROG = [
+  { root: 0, minor: true },   // Am
+  { root: -4, minor: false }, // F
+  { root: -7, minor: true },  // Dm
+  { root: -5, minor: false }, // E
+];
+let titleTimer: number | null = null;
+
+export function startTitleMusic(): void {
+  if (titleTimer !== null || !ctx) return;
+  const sixteenth = 60000 / 92 / 4;
+  let step = 0;
+  titleTimer = window.setInterval(() => {
+    const bar = Math.floor(step / 16);
+    const chord = TITLE_PROG[Math.floor(bar / 2)];
+    const root = 110 * Math.pow(2, chord.root / 12);
+    const s = step % 16;
+    if (s === 0 || s === 8) env(95, 'sine', 0.13, 0.16, 38);
+    if (s % 4 === 2) noise(0.03, 'highpass', 7000, 0.018);
+    if (s % 2 === 0) {
+      const oct = s === 12 ? 12 : 0;
+      env(root * Math.pow(2, oct / 12), 'triangle', 0.17, 0.08, undefined, 500);
+    }
+    const arp = chord.minor ? [0, 3, 7, 12] : [0, 4, 7, 12];
+    const tone = arp[s % 4] + (s % 8 >= 4 ? 12 : 0);
+    env(root * 4 * Math.pow(2, tone / 12), 'triangle', 0.11, 0.032, undefined, 2400);
+    step = (step + 1) % 128;
+  }, sixteenth);
+}
+
+export function stopTitleMusic(): void {
+  if (titleTimer !== null) window.clearInterval(titleTimer);
+  titleTimer = null;
+}
+
 export function startDrone(round: number): void {
   stopDrone();
   if (!ctx || !master) return;
