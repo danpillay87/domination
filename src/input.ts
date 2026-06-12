@@ -11,6 +11,59 @@ export function consumePresses(): string[] {
   return queue.splice(0);
 }
 
+// Touch UI buttons inject presses through the same queue as the keyboard.
+export function pushPress(k: string): void {
+  queue.push(k.toLowerCase());
+}
+
+// Touchscreen play: drag to aim, tap to fire, hold anywhere to grip.
+export const touch = {
+  aimX: 0,
+  aimY: 0,
+  aiming: false,
+  fired: false,
+  shieldDir: 0, // driven by the on-screen ◀ ▶ buttons
+  held: false,
+};
+
+export function initTouch(c: HTMLCanvasElement): void {
+  const pos = (t: Touch) => {
+    const r = c.getBoundingClientRect();
+    touch.aimX = ((t.clientX - r.left) / r.width) * 2 - 1;
+    touch.aimY = -(((t.clientY - r.top) / r.height) * 2 - 1);
+  };
+  c.addEventListener(
+    'touchstart',
+    (e) => {
+      e.preventDefault();
+      pos(e.touches[0]);
+      touch.aiming = true;
+      touch.fired = true;
+      touch.held = true;
+    },
+    { passive: false },
+  );
+  c.addEventListener(
+    'touchmove',
+    (e) => {
+      e.preventDefault();
+      pos(e.touches[0]);
+    },
+    { passive: false },
+  );
+  for (const ev of ['touchend', 'touchcancel'] as const) {
+    c.addEventListener(ev, (e) => {
+      if (e.touches.length === 0) touch.held = false;
+    });
+  }
+}
+
+export function consumeTouchFire(): boolean {
+  const f = touch.fired;
+  touch.fired = false;
+  return f;
+}
+
 let canvas: HTMLCanvasElement | null = null;
 
 export function initInput(c: HTMLCanvasElement, onFirstInteract: () => void): void {

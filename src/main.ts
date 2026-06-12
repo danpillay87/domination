@@ -1,5 +1,8 @@
 import { buildLadder, dollars, type Round } from './countries';
-import { initInput, mouse, consumeFire, consumePresses, key, rumble, pollPad } from './input';
+import {
+  initInput, mouse, consumeFire, consumePresses, key, rumble, pollPad,
+  pushPress, touch, initTouch, consumeTouchFire,
+} from './input';
 import {
   newDuel, step, mulberry32,
   type DuelState, type Side, type SideInputs,
@@ -163,6 +166,11 @@ let gripInfoOk = false;
 let ledgerText: string | null = null;
 let rulesOpen = false;
 
+// Touch devices get tappable menus and on-screen controls. ?touch=1 forces it for testing.
+const IS_TOUCH =
+  (typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches) ||
+  location.search.includes('touch=1');
+
 function setRules(open: boolean): void {
   rulesOpen = open;
   $('rules').style.display = open ? 'block' : 'none';
@@ -292,7 +300,9 @@ function startRound(): void {
       : roundIdx === 3
         ? TAUNTS.finalRound[0]
         : '';
-  ui.help.textContent = 'MOUSE: AIM+FIRE LASER · A/D: SHIELD · 1,2: MISSILES · NEVER RELEASE THE GRIPS';
+  ui.help.textContent = IS_TOUCH
+    ? 'TAP: FIRE LASER · ◀ ▶: SHIELD · ▲: MISSILE · WHEN SHOCKED, HOLD THE SCREEN'
+    : 'MOUSE: AIM+FIRE LASER · A/D: SHIELD · 1,2: MISSILES · NEVER RELEASE THE GRIPS';
   announceRound(r.name, `${r.name}. ${r.stake.toLocaleString('en-US')} dollars.`);
   warnT = 0;
   prevLargoAmmo = 2;
@@ -339,7 +349,12 @@ function endRound(loser: Side, reason: DuelState['reason']): void {
   sendShock(loser, roundIdx, 3000);
   ui.center.textContent =
     loser === my() ? `${r.name} FALLS TO ${oppName()}` : `${r.name} IS YOURS`;
-  ui.sub.textContent = loser === my() ? 'HOLD [SPACE] OR YOUR GRIPS — ENDURE THE PAIN' : '';
+  ui.sub.textContent =
+    loser === my()
+      ? IS_TOUCH
+        ? 'HOLD THE SCREEN — ENDURE THE PAIN'
+        : 'HOLD [SPACE] OR YOUR GRIPS — ENDURE THE PAIN'
+      : '';
   ui.taunt.textContent = mp
     ? ''
     : loser === 'p'
@@ -382,10 +397,26 @@ function afterShock(): void {
   startRound();
 }
 
+const dispCache = new Map<HTMLElement, string>();
+function setDisp(el: HTMLElement, v: string): void {
+  if (dispCache.get(el) !== v) {
+    dispCache.set(el, v);
+    el.style.display = v;
+  }
+}
+
 function tick(dt: number): void {
   phaseT += dt;
   pressSeq = consumePresses();
   presses = new Set(pressSeq);
+
+  if (IS_TOUCH) {
+    const menuOn =
+      phase === 'attract' && attractMode === 'title' && !rulesOpen && !naming && mpWait !== 'entering';
+    setDisp($('touchMenu'), menuOn ? 'flex' : 'none');
+    setDisp($('padL'), phase === 'duel' ? 'flex' : 'none');
+    setDisp($('padR'), phase === 'duel' ? 'flex' : 'none');
+  }
 
   if (mpWait !== 'entering' && !naming) {
     if (pressed('m')) {
@@ -585,14 +616,24 @@ function tick(dt: number): void {
         padRet.y = Math.max(-1.0, Math.min(1.0, padRet.y + pad.aimDY * 2.4 * SIM_DT));
       }
       const w = ndcToWorld(mouse.x, mouse.y);
-      currentReticle = lastDevice === 'pad' ? { x: padRet.x, y: padRet.y } : w;
+      const tw = ndcToWorld(touch.aimX, touch.aimY);
+      currentReticle =
+        lastDevice === 'pad' ? { x: padRet.x, y: padRet.y } : touch.aiming ? tw : w;
       const fire = consumeFire();
+      const tFire = consumeTouchFire();
       const myIn: SideInputs = {
         shieldDir:
           (key('d') || key('arrowright') ? 1 : 0) +
           (key('a') || key('arrowleft') ? -1 : 0) +
-          pad.shieldDir,
-        fireAt: fire ? { x: w.x, y: w.y } : pad.fire ? { x: padRet.x, y: padRet.y } : null,
+          pad.shieldDir +
+          touch.shieldDir,
+        fireAt: tFire
+          ? { x: tw.x, y: tw.y }
+          : fire
+            ? { x: w.x, y: w.y }
+            : pad.fire
+              ? { x: padRet.x, y: padRet.y }
+              : null,
         launch: pressed('1') || pressed('2') || pressed('e') || pad.launch,
       };
       myIn.shieldDir = Math.max(-1, Math.min(1, myIn.shieldDir));
@@ -699,7 +740,8 @@ function tick(dt: number): void {
 
       if (meVictim) {
         const s = shock.victim;
-        const gripping = key(' ') || pollPad().grip || (phoneConnected(s) && phoneHeld(s));
+        const gripping =
+          key(' ') || pollPad().grip || (IS_TOUCH && touch.held) || (phoneConnected(s) && phoneHeld(s));
         if (!gripping && shock.t > 0.25) shock.outcome = 'release';
         endurance[s] -= rate * dt;
         if (endurance[s] <= 0) shock.outcome = 'collapse';
@@ -848,6 +890,47 @@ fmtCash();
 
 // Grip-station join QR for the title screen — dev server only (the relay and
 // grip.html don't exist on the published build).
+// Touch devices: tappable menu, on-screen shield/launch, native prompts for text.
+if (IS_TOUCH) {
+  initTouch(canvas);
+  document.querySelectorAll<HTMLButtonElement>('#touchMenu .tbtn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      initAudio();
+      const k = btn.dataset.k ?? '';
+      if (k === 'j') {
+        const code = (window.prompt('ENTER TABLE CODE (4 LETTERS)') ?? '').trim().toLowerCase();
+        if (/^[a-z]{4}$/.test(code)) {
+          pushPress('j');
+          for (const c of code) pushPress(c);
+        }
+      } else if (k === 'n') {
+        const name = (window.prompt('YOUR NAME (A-Z 0-9, MAX 8)') ?? '').trim().toLowerCase();
+        if (name) {
+          pushPress('n');
+          for (const c of name.slice(0, 8)) if (/^[a-z0-9]$/.test(c)) pushPress(c);
+          pushPress('enter');
+        }
+      } else {
+        pushPress(k);
+      }
+    });
+  });
+  const holdBtn = (id: string, dir: number) => {
+    const el = $(id);
+    el.addEventListener('touchstart', (e) => { e.preventDefault(); touch.shieldDir = dir; }, { passive: false });
+    el.addEventListener('mousedown', () => { touch.shieldDir = dir; });
+    for (const ev of ['touchend', 'touchcancel', 'mouseup', 'mouseleave']) {
+      el.addEventListener(ev, () => { touch.shieldDir = 0; });
+    }
+  };
+  holdBtn('shieldL', -1);
+  holdBtn('shieldR', 1);
+  const launch = $('launchBtn');
+  launch.addEventListener('touchstart', (e) => { e.preventDefault(); pushPress('1'); }, { passive: false });
+  launch.addEventListener('mousedown', () => pushPress('1'));
+  $('rules').addEventListener('click', () => setRules(false));
+}
+
 // First visit: show the rules of the table before anything else.
 try {
   if (!localStorage.getItem('dom.seenRules')) setRules(true);
