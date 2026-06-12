@@ -22,6 +22,10 @@ export function netMode(): 'supabase' | 'relay' {
   return SUPA_URL && SUPA_KEY ? 'supabase' : 'relay';
 }
 
+export function getSupa(): SupabaseClient | null {
+  return supa;
+}
+
 export function netInit(): void {
   if (netMode() === 'supabase') {
     supa = createClient(SUPA_URL!, SUPA_KEY!, {

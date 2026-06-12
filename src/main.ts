@@ -10,9 +10,10 @@ import {
   renderStats,
 } from './render';
 import {
-  initAudio, sfx, startDrone, stopDrone, startAlarm, stopAlarm, announce,
+  initAudio, sfx, startDrone, stopDrone, startAlarm, stopAlarm, announceRound,
   startMusic, stopMusic, startTitleMusic, stopTitleMusic, setMuted,
 } from './audio';
+import { initAuth, signedIn, signInGoogle, signOut, recordMatch, topLedger } from './auth';
 import { initHaptics, phoneConnected, phoneHeld, sendShock } from './haptics';
 import { netInit, netOn, netSend, netJoin, netLeave, netMode, type NetMsg } from './net';
 import QRCode from 'qrcode';
@@ -159,6 +160,7 @@ function sendInputWindow(target: number): void {
 }
 
 let gripInfoOk = false;
+let ledgerText: string | null = null;
 
 // Player identity — arcade name entry, persisted. Sign-in can layer on later.
 let playerName: string = (() => {
@@ -280,7 +282,7 @@ function startRound(): void {
         ? TAUNTS.finalRound[0]
         : '';
   ui.help.textContent = 'MOUSE: AIM+FIRE LASER · A/D: SHIELD · 1,2: MISSILES · NEVER RELEASE THE GRIPS';
-  announce(`${r.name}. ${r.stake.toLocaleString('en-US')} dollars.`);
+  announceRound(r.name, `${r.name}. ${r.stake.toLocaleString('en-US')} dollars.`);
   warnT = 0;
   prevLargoAmmo = 2;
   lastBeepSecond = -1;
@@ -345,8 +347,9 @@ function finishMatch(won: boolean, headline: string): void {
   fmtCash();
   ui.center.textContent = `${headline}\n${won ? 'THE WORLD IS YOURS' : mp ? 'THE TABLE IS LOST' : 'DOMINATION: LARGO'}`;
   ui.sub.textContent = 'PRESS ENTER TO PLAY AGAIN';
-  ui.help.textContent = `FINAL — 007 ${dollars(cash.p)} · LARGO ${dollars(cash.l)}`;
+  ui.help.textContent = `FINAL — ${names.p} ${dollars(cash.p)} · ${names.l} ${dollars(cash.l)}`;
   if (won) sfx.win();
+  recordMatch(names[my()], names[my() === 'p' ? 'l' : 'p'], won, won ? cash[my()] : 0);
   setPhase('over');
 }
 
@@ -390,10 +393,12 @@ function tick(dt: number): void {
     case 'attract': {
       startTitleMusic(); // no-op until the audio context exists (first interaction)
       if (attractMode === 'title') {
-        setTxt(ui.center, 'DOMINATION');
+        setTxt(ui.center, ledgerText ?? 'DOMINATION');
         setTxt(
           ui.sub,
-          naming
+          ledgerText
+            ? 'L: CLOSE THE LEDGER'
+            : naming
             ? `YOUR NAME: ${nameBuf}_`
             : mpWait === 'hosting'
               ? `TABLE ${tableCode} — TELL YOUR CHALLENGER THE CODE`
@@ -406,9 +411,9 @@ function tick(dt: number): void {
         setTxt(ui.taunt, '');
         setTxt(
           ui.help,
-          `ENTER: VS LARGO · O: HOST · J: JOIN · N: NAME (${playerName}) · M: MUTE · C: CRT · LINK: ${
-            netMode() === 'supabase' ? 'GLOBAL ◉' : 'LOCAL RELAY'
-          }`,
+          `ENTER: VS LARGO · O: HOST · J: JOIN · N: NAME (${playerName}) · G: ${
+            signedIn() ? 'SIGNED IN ◉' : 'SIGN IN'
+          } · L: LEDGER · M: MUTE · C: CRT · LINK: ${netMode() === 'supabase' ? 'GLOBAL ◉' : 'LOCAL RELAY'}`,
         );
         setHTML(ui.marquee, '');
         $('joinInfo').style.display = gripInfoOk ? 'flex' : 'none';
@@ -474,6 +479,24 @@ function tick(dt: number): void {
           mpHelloTimer = window.setInterval(() => netSend({ t: 'mp-hello', name: playerName }), 1200);
         }
         break;
+      }
+
+      if (pressed('g')) {
+        if (signedIn()) signOut();
+        else signInGoogle();
+      }
+      if (pressed('l')) {
+        if (ledgerText) ledgerText = null;
+        else {
+          ledgerText = 'WORLD DOMINATION LEDGER\nCONSULTING THE HOUSE…';
+          void topLedger().then((rows) => {
+            ledgerText =
+              'WORLD DOMINATION LEDGER\n' +
+              (rows.length
+                ? rows.map((r, i) => `${i + 1}. ${r.player} — ${dollars(r.career_winnings)} (${r.wins}W)`).join('\n')
+                : 'NO CONQUERORS YET');
+          });
+        }
       }
 
       // Lobby keys work from the title AND mid-demonstration.
@@ -728,6 +751,7 @@ initRender(canvas);
 initInput(canvas, () => initAudio());
 initHaptics();
 netInit();
+initAuth();
 netOn((m: NetMsg) => {
   switch (m.t) {
     case 'mp-hello': {

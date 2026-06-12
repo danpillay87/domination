@@ -236,3 +236,13 @@ export function announce(text: string): void {
     speechSynthesis.speak(u);
   } catch {}
 }
+
+// Pre-rendered announcer (ElevenLabs assets in public/announcer); the line
+// includes the stake. Falls back to speech synthesis if the asset is missing.
+export function announceRound(name: string, fallback: string): void {
+  if (muted) return;
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+  const a = new Audio(`${import.meta.env.BASE_URL}announcer/${slug}.mp3`);
+  a.volume = 0.85;
+  a.play().catch(() => announce(fallback));
+}
