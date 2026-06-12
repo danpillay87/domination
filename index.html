@@ -84,6 +84,14 @@
       position: absolute; inset: 0; background: #ff2200; opacity: 0; pointer-events: none;
       mix-blend-mode: screen;
     }
+    #joinInfo {
+      position: absolute; bottom: 4%; left: 3%; display: none;
+      align-items: center; gap: 10px; color: #8a7a4a;
+      font-size: clamp(8px, 1.4vmin, 12px); letter-spacing: 0.12em; text-align: left;
+    }
+    #joinInfo canvas { image-rendering: pixelated; opacity: 0.85; }
+    #joinInfo .lines span { display: block; }
+    #joinInfo .lines .url { color: var(--amber); }
     #scanfx {
       position: absolute; inset: 0; pointer-events: none; border-radius: 10px;
       background: repeating-linear-gradient(0deg, rgba(0,0,0,0.18) 0 1px, transparent 1px 3px);
@@ -105,6 +113,14 @@
         <div id="subMsg"></div>
         <div id="taunt"></div>
         <div id="help"></div>
+        <div id="joinInfo">
+          <canvas id="joinQr" width="92" height="92"></canvas>
+          <div class="lines">
+            <span>GRIP STATION — SCAN WITH YOUR PHONE</span>
+            <span class="url" id="joinUrl"></span>
+            <span>HOLD THE SCREEN. THE LOSER FEELS IT BUZZ.</span>
+          </div>
+        </div>
         <div id="shockFlash"></div>
         <div id="scanfx"></div>
       </div>

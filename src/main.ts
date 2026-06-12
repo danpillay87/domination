@@ -12,6 +12,8 @@ import {
   initAudio, sfx, startDrone, stopDrone, startAlarm, stopAlarm, announce,
   startMusic, stopMusic, setMuted,
 } from './audio';
+import { initHaptics, phoneConnected, phoneHeld, sendShock } from './haptics';
+import QRCode from 'qrcode';
 
 type Phase = 'attract' | 'intro' | 'duel' | 'shock' | 'over';
 
@@ -117,6 +119,7 @@ function makeDemo(): void {
 }
 
 function startRound(): void {
+  $('joinInfo').style.display = 'none';
   const r = ROUNDS[roundIdx];
   duel = newDuel(r, roundIdx, rng);
   largo = new Largo('l', roundIdx, rng);
@@ -171,6 +174,7 @@ function endRound(loser: Side, reason: DuelState['reason']): void {
     rumbleAt: 0,
   };
   ui.flash.style.background = loser === 'p' ? '#ff2200' : '#ff7a00';
+  sendShock(loser, roundIdx, 3000);
   ui.center.textContent =
     loser === 'p' ? `${r.name} FALLS TO LARGO` : `${r.name} IS YOURS`;
   ui.sub.textContent = loser === 'p' ? 'HOLD [SPACE] — ENDURE THE PAIN' : '';
@@ -232,6 +236,7 @@ function tick(dt: number): void {
         ui.help.textContent =
           'A GAME OF POWER · THE LOSER FEELS PAIN · M: MUTE · C: CRT · SPAIN $9,000 — THE WORLD $325,000';
         ui.marquee.innerHTML = '';
+        $('joinInfo').style.display = 'flex';
         if (phaseT > 9) {
           makeDemo();
           showAttract(false);
@@ -239,6 +244,7 @@ function tick(dt: number): void {
           setPhase('attract');
         }
       } else if (demo) {
+        $('joinInfo').style.display = 'none';
         ui.center.textContent = '';
         ui.sub.textContent = 'DEMONSTRATION — PRESS ENTER';
         const inputs: Record<Side, SideInputs> = {
@@ -345,7 +351,7 @@ function tick(dt: number): void {
       const rate = shock.drain / shock.dur;
 
       if (shock.victim === 'p') {
-        const gripping = key(' ') || pollPad().grip;
+        const gripping = key(' ') || pollPad().grip || (phoneConnected('p') && phoneHeld('p'));
         if (!gripping && shock.t > 0.25) shock.outcome = 'release';
         endurance.p -= rate * dt;
         if (endurance.p <= 0) shock.outcome = 'collapse';
@@ -391,10 +397,25 @@ function tick(dt: number): void {
 const canvas = document.getElementById('game') as HTMLCanvasElement;
 initRender(canvas);
 initInput(canvas, () => initAudio());
+initHaptics();
 showAttract(true);
 setMuted(settings.muted);
 setCrt(settings.crt);
 fmtCash();
+
+// Grip-station join QR for the title screen.
+fetch('/grip-info')
+  .then((r) => r.json())
+  .then((info: { ip: string; port: number }) => {
+    const url = `http://${info.ip}:${info.port}/grip.html`;
+    $('joinUrl').textContent = url.replace('http://', '');
+    return QRCode.toCanvas($('joinQr') as HTMLCanvasElement, url, {
+      width: 92,
+      margin: 1,
+      color: { dark: '#ffd24aff', light: '#00000000' },
+    });
+  })
+  .catch(() => {});
 
 let last = performance.now();
 let acc = 0;
@@ -436,5 +457,6 @@ resize();
   get attractMode() { return attractMode; },
   get demo() { return demo; },
   get settings() { return settings; },
+  get phone() { return { connected: phoneConnected('p'), held: phoneHeld('p') }; },
   skipToEnd() { if (duel) duel.time = duel.duration - 0.3; },
 };

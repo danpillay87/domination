@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#0a0806" />
+  <title>DOMINATION — GRIP STATION</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { height: 100%; background: #0a0806; overflow: hidden; touch-action: none; }
+    body {
+      font-family: "Consolas", "Courier New", monospace;
+      color: #ffd24a;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 4vh; text-align: center; user-select: none; -webkit-user-select: none;
+      background: radial-gradient(ellipse at center, #14100a 0%, #060403 80%);
+    }
+    body::after {
+      content: ''; position: fixed; inset: 0; pointer-events: none;
+      background: repeating-linear-gradient(0deg, rgba(0,0,0,0.22) 0 1px, transparent 1px 3px);
+    }
+    h1 { font-size: 5.5vw; letter-spacing: 0.4em; font-weight: normal; text-shadow: 0 0 10px currentColor; }
+    #status { font-size: 3.4vw; color: #888; letter-spacing: 0.2em; min-height: 1.4em; }
+    .btn {
+      font-family: inherit; font-size: 5vw; letter-spacing: 0.3em; padding: 4vw 8vw;
+      background: none; border: 1px solid currentColor; border-radius: 12px;
+      text-shadow: 0 0 10px currentColor; box-shadow: 0 0 14px -4px currentColor;
+    }
+    #pickP { color: #2ee6ff; }
+    #pickL { color: #ff6a1f; }
+    #gripZone {
+      width: 64vw; height: 64vw; max-width: 70vh; max-height: 70vh; border-radius: 50%;
+      border: 2px solid currentColor; display: none; align-items: center; justify-content: center;
+      font-size: 6vw; letter-spacing: 0.35em; text-shadow: 0 0 12px currentColor;
+      box-shadow: 0 0 40px -8px currentColor, inset 0 0 40px -16px currentColor;
+    }
+    #gripZone.held { background: radial-gradient(circle, rgba(255,255,255,0.12), transparent 70%); }
+    #flash {
+      position: fixed; inset: 0; background: #ff2200; opacity: 0; pointer-events: none;
+      transition: opacity 80ms linear;
+    }
+    #note { font-size: 3vw; color: #666; letter-spacing: 0.15em; padding: 0 8vw; }
+  </style>
+</head>
+<body>
+  <h1>DOMINATION</h1>
+  <div id="status">GRIP STATION</div>
+  <button class="btn" id="pickP">007</button>
+  <button class="btn" id="pickL">LARGO</button>
+  <div id="gripZone">HOLD</div>
+  <div id="note"></div>
+  <div id="flash"></div>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let player = null;
+    let ws = null;
+    let held = false;
+    const canBuzz = 'vibrate' in navigator;
+
+    function send(obj) {
+      if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
+    }
+
+    function connect() {
+      ws = new WebSocket(`ws://${location.host}/grip-ws`);
+      ws.onopen = () => {
+        $('status').textContent = player ? 'LINKED — NEVER RELEASE' : 'LINKED — CHOOSE YOUR SEAT';
+        if (player) send({ t: 'hello', player });
+      };
+      ws.onclose = () => {
+        $('status').textContent = 'LINK LOST — RETRYING';
+        setTimeout(connect, 2000);
+      };
+      ws.onmessage = (e) => {
+        let m;
+        try { m = JSON.parse(e.data); } catch { return; }
+        if (m.t === 'shock' && m.player === player) shock(m.level ?? 0);
+      };
+    }
+
+    const PATTERNS = [
+      [220, 140, 220, 140, 220],
+      [420, 110, 420, 110, 420],
+      [850, 90, 850, 90, 850],
+      [2400],
+    ];
+
+    function shock(level) {
+      const pat = PATTERNS[Math.max(0, Math.min(3, level))];
+      if (canBuzz) navigator.vibrate(pat);
+      const total = pat.reduce((a, b) => a + b, 0);
+      const f = $('flash');
+      let on = true;
+      const iv = setInterval(() => {
+        f.style.opacity = on ? String(0.35 + level * 0.12) : '0';
+        on = !on;
+      }, 90);
+      setTimeout(() => { clearInterval(iv); f.style.opacity = '0'; }, total);
+    }
+
+    function setHeld(h) {
+      if (h === held || !player) return;
+      held = h;
+      $('gripZone').classList.toggle('held', h);
+      send({ t: 'grip', player, held: h });
+    }
+
+    function pick(p, color) {
+      player = p;
+      document.body.style.color = color;
+      $('pickP').style.display = 'none';
+      $('pickL').style.display = 'none';
+      const z = $('gripZone');
+      z.style.display = 'flex';
+      z.style.color = color;
+      $('status').textContent = 'LINKED — NEVER RELEASE';
+      $('note').textContent = canBuzz
+        ? 'THE MACHINE PUNISHES THE LOSER. HOLD THE GRIP.'
+        : 'NO VIBRATION ON THIS PHONE — VISUAL SHOCK ONLY. HOLD THE GRIP.';
+      send({ t: 'hello', player });
+      if (canBuzz) navigator.vibrate(60);
+      if (navigator.wakeLock) navigator.wakeLock.request('screen').catch(() => {});
+      setInterval(() => send({ t: 'hello', player, held }), 5000);
+    }
+
+    $('pickP').addEventListener('click', () => pick('p', '#2ee6ff'));
+    $('pickL').addEventListener('click', () => pick('l', '#ff6a1f'));
+
+    const z = $('gripZone');
+    for (const ev of ['touchstart', 'mousedown']) z.addEventListener(ev, (e) => { e.preventDefault(); setHeld(true); });
+    for (const ev of ['touchend', 'touchcancel', 'mouseup', 'mouseleave']) z.addEventListener(ev, (e) => { e.preventDefault(); setHeld(false); });
+
+    connect();
+  </script>
+</body>
+</html>
