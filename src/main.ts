@@ -1,4 +1,4 @@
-import { ROUNDS, dollars } from './countries';
+import { buildLadder, dollars, type Round } from './countries';
 import { initInput, mouse, consumeFire, consumePresses, key, rumble, pollPad } from './input';
 import {
   newDuel, step, mulberry32,
@@ -14,7 +14,7 @@ import {
   startMusic, stopMusic, setMuted,
 } from './audio';
 import { initHaptics, phoneConnected, phoneHeld, sendShock } from './haptics';
-import { netInit, netOn, netSend, netMode, netReady, type NetMsg } from './net';
+import { netInit, netOn, netSend, netJoin, netLeave, netMode, type NetMsg } from './net';
 import QRCode from 'qrcode';
 
 type Phase = 'attract' | 'intro' | 'duel' | 'shock' | 'over';
@@ -50,6 +50,7 @@ const SIM_DT = 1 / 60;
 let phase: Phase = 'attract';
 let phaseT = 0;
 let roundIdx = 0;
+let matchRounds: Round[] = [];
 let cash: Record<Side, number> = { p: 0, l: 0 };
 let endurance: Record<Side, number> = { p: 100, l: 100 };
 let duel: DuelState | null = null;
@@ -72,7 +73,7 @@ let quipShown = false;
 
 // Attract: cycle title globe ↔ AI-vs-AI demonstration, like a real cabinet.
 let attractMode: 'title' | 'demo' = 'title';
-let demo: { duel: DuelState; aiP: Largo; aiL: Largo; rng: () => number } | null = null;
+let demo: { duel: DuelState; aiP: Largo; aiL: Largo; rng: () => number; round: Round } | null = null;
 
 // Gamepad reticle lives in world coords; last-moved device owns the reticle.
 const padRet = { x: 0, y: 0 };
@@ -84,7 +85,16 @@ let currentReticle: { x: number; y: number } | null = null;
 const INPUT_DELAY = 8; // ticks of input latency budget — covers cloud-relay RTT + send cadence
 const REDUNDANCY = 12; // each input message carries this many trailing ticks — heals dropped messages
 let mp: { role: 'host' | 'guest'; mySide: Side; seed: number } | null = null;
-let mpWait: 'hosting' | 'joining' | null = null;
+let mpWait: 'hosting' | 'entering' | 'joining' | null = null;
+let tableCode = '';
+let codeBuf = '';
+
+function makeTableCode(): string {
+  const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; // no I/O — they read badly on a CRT
+  let c = '';
+  for (let i = 0; i < 4; i++) c += A[Math.floor(Math.random() * A.length)];
+  return c;
+}
 let mpHelloTimer: number | null = null;
 let duelTick = 0;
 let stallT = 0;
@@ -122,6 +132,7 @@ function beginMpMatch(role: 'host' | 'guest', seed: number): void {
   ui.flash.style.background = '#ff2200';
   ui.flash.style.opacity = '0';
   rng = mulberry32(seed);
+  matchRounds = buildLadder(rng); // identical on both clients — same seed
   startRound();
 }
 
@@ -130,6 +141,7 @@ function leaveMp(): void {
   mp = null;
   mpWait = null;
   stopHello();
+  netLeave();
 }
 
 // Lockstep over a lossy broadcast channel: every message carries the last
@@ -195,23 +207,26 @@ function startMatch(): void {
   ui.flash.style.background = '#ff2200';
   ui.flash.style.opacity = '0';
   rng = mulberry32((Math.random() * 1e9) | 0); // match seed; sim itself stays deterministic per seed
+  matchRounds = buildLadder(rng);
   startRound();
 }
 
 function makeDemo(): void {
   const seed = mulberry32((Math.random() * 1e9) | 0);
+  const round = buildLadder(seed)[0];
   demo = {
-    duel: newDuel(ROUNDS[0], 1, seed),
+    duel: newDuel(round, 1, seed),
     aiP: new Largo('p', 1, seed),
     aiL: new Largo('l', 1, seed),
     rng: seed,
+    round,
   };
   buildRound(demo.duel.outline);
 }
 
 function startRound(): void {
   $('joinInfo').style.display = 'none';
-  const r = ROUNDS[roundIdx];
+  const r = matchRounds[roundIdx];
   duel = newDuel(r, roundIdx, rng, !!mp);
   largo = new Largo('l', roundIdx, rng);
   duelTick = 0;
@@ -260,7 +275,7 @@ function beginDuel(): void {
 function endRound(loser: Side, reason: DuelState['reason']): void {
   stopDrone();
   stopMusic();
-  const r = ROUNDS[roundIdx];
+  const r = matchRounds[roundIdx];
   const winner: Side = loser === 'p' ? 'l' : 'p';
 
   if (reason === 'crack') {
@@ -331,15 +346,17 @@ function tick(dt: number): void {
   phaseT += dt;
   presses = new Set(consumePresses());
 
-  if (pressed('m')) {
-    settings.muted = !settings.muted;
-    setMuted(settings.muted);
-    saveSettings();
-  }
-  if (pressed('c')) {
-    settings.crt = !settings.crt;
-    setCrt(settings.crt);
-    saveSettings();
+  if (mpWait !== 'entering') {
+    if (pressed('m')) {
+      settings.muted = !settings.muted;
+      setMuted(settings.muted);
+      saveSettings();
+    }
+    if (pressed('c')) {
+      settings.crt = !settings.crt;
+      setCrt(settings.crt);
+      saveSettings();
+    }
   }
 
   switch (phase) {
@@ -349,16 +366,18 @@ function tick(dt: number): void {
         setTxt(
           ui.sub,
           mpWait === 'hosting'
-            ? 'TABLE OPEN — AWAITING CHALLENGER'
-            : mpWait === 'joining'
-              ? 'SEEKING A TABLE…'
-              : 'PRESS ENTER',
+            ? `TABLE ${tableCode} — TELL YOUR CHALLENGER THE CODE`
+            : mpWait === 'entering'
+              ? `ENTER TABLE CODE: ${codeBuf}${'·'.repeat(4 - codeBuf.length)}`
+              : mpWait === 'joining'
+                ? `SEEKING TABLE ${codeBuf}…`
+                : 'PRESS ENTER',
         );
         setTxt(ui.taunt, '');
         setTxt(
           ui.help,
           `ENTER: VS LARGO · O: HOST TABLE · J: JOIN TABLE · M: MUTE · C: CRT · LINK: ${
-            netMode() === 'supabase' ? (netReady() ? 'GLOBAL ◉' : 'GLOBAL …') : 'LOCAL RELAY'
+            netMode() === 'supabase' ? 'GLOBAL ◉' : 'LOCAL RELAY'
           }`,
         );
         setHTML(ui.marquee, '');
@@ -381,7 +400,7 @@ function tick(dt: number): void {
         const left = Math.max(0, demo.duel.duration - demo.duel.time);
         setHTML(
           ui.marquee,
-          `SPAIN — ${dollars(9000)}` +
+          `${demo.round.name} — ${dollars(demo.round.stake)}` +
             `<span class="stake">DEMO ${demo.duel.strikes.p} — ${demo.duel.strikes.l} · ${left.toFixed(0)}s</span>`,
         );
         if (demo.duel.over || phaseT > 30) {
@@ -391,6 +410,26 @@ function tick(dt: number): void {
           setPhase('attract');
         }
       }
+      // Code entry captures the keyboard; other lobby keys are suspended.
+      if (mpWait === 'entering') {
+        for (const k of presses) {
+          if (/^[a-z]$/.test(k) && codeBuf.length < 4) codeBuf += k.toUpperCase();
+          else if (k === 'backspace') codeBuf = codeBuf.slice(0, -1);
+          else if (k === 'escape') {
+            mpWait = null;
+            codeBuf = '';
+          }
+        }
+        if (mpWait === 'entering' && codeBuf.length === 4) {
+          netJoin(codeBuf);
+          mpWait = 'joining';
+          stopHello();
+          netSend({ t: 'mp-hello' });
+          mpHelloTimer = window.setInterval(() => netSend({ t: 'mp-hello' }), 1200);
+        }
+        break;
+      }
+
       // Lobby keys work from the title AND mid-demonstration.
       if (pressed('o') || pressed('j') || pressed('escape')) {
         if (attractMode === 'demo') {
@@ -400,24 +439,27 @@ function tick(dt: number): void {
           setPhase('attract');
         }
         if (pressed('o')) {
-          mpWait = mpWait === 'hosting' ? null : 'hosting';
+          if (mpWait === 'hosting') {
+            mpWait = null;
+            netLeave();
+          } else {
+            tableCode = makeTableCode();
+            netJoin(tableCode);
+            mpWait = 'hosting';
+          }
           stopHello();
         } else if (pressed('j')) {
-          if (mpWait === 'joining') {
-            mpWait = null;
-            stopHello();
-          } else {
-            mpWait = 'joining';
-            stopHello();
-            netSend({ t: 'mp-hello' });
-            mpHelloTimer = window.setInterval(() => netSend({ t: 'mp-hello' }), 1200);
-          }
+          stopHello();
+          netLeave();
+          mpWait = 'entering';
+          codeBuf = '';
         } else {
           mpWait = null;
           stopHello();
+          netLeave();
         }
       }
-      if (pressed('enter')) {
+      if (pressed('enter') && !mpWait) {
         initAudio();
         startMatch();
       }
@@ -431,7 +473,7 @@ function tick(dt: number): void {
     }
     case 'duel': {
       if (!duel || !largo) break;
-      const r = ROUNDS[roundIdx];
+      const r = matchRounds[roundIdx];
       const pad = pollPad();
       if (mouse.moved) {
         mouse.moved = false;
@@ -760,5 +802,6 @@ resize();
   get mp() { return mp ? { role: mp.role, mySide: mp.mySide, seed: mp.seed, duelTick, stallT } : null; },
   get mpWait() { return mpWait; },
   get renderStats() { return renderStats(); },
+  get ladder() { return matchRounds.map((r) => `${r.name} ${r.stake}`); },
   skipToEnd() { if (duel) duel.time = duel.duration - 0.3; },
 };
