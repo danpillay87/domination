@@ -46,7 +46,10 @@ function gripRelay(): Plugin {
   };
 }
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
+  // Production build is published at danpillay87.github.io/domination/
+  base: command === 'build' ? '/domination/' : '/',
+  build: { outDir: 'docs' },
   plugins: [gripRelay()],
   resolve: {
     // Project is reached via an NTFS junction from the dev workspace; don't
@@ -59,4 +62,4 @@ export default defineConfig({
       allow: ['.', 'C:/Users/DanPillay/domination-game'],
     },
   },
-});
+}));

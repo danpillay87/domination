@@ -142,6 +142,8 @@ function sendInputWindow(target: number): void {
   netSend({ t: 'mp-in', sid: mp.seed, side: mp.mySide, from, ins });
 }
 
+let gripInfoOk = false;
+
 const settings: { muted: boolean; crt: boolean } = (() => {
   try {
     return { muted: false, crt: true, ...JSON.parse(localStorage.getItem('dom.settings') ?? '{}') };
@@ -360,7 +362,7 @@ function tick(dt: number): void {
           }`,
         );
         setHTML(ui.marquee, '');
-        $('joinInfo').style.display = 'flex';
+        $('joinInfo').style.display = gripInfoOk ? 'flex' : 'none';
         if (!mpWait && phaseT > 9) {
           makeDemo();
           showAttract(false);
@@ -698,12 +700,14 @@ setMuted(settings.muted);
 setCrt(settings.crt);
 fmtCash();
 
-// Grip-station join QR for the title screen.
+// Grip-station join QR for the title screen — dev server only (the relay and
+// grip.html don't exist on the published build).
 fetch('/grip-info')
-  .then((r) => r.json())
+  .then((r) => (r.ok ? r.json() : Promise.reject(new Error('no relay'))))
   .then((info: { ip: string; port: number }) => {
     const url = `http://${info.ip}:${info.port}/grip.html`;
     $('joinUrl').textContent = url.replace('http://', '');
+    gripInfoOk = true;
     return QRCode.toCanvas($('joinQr') as HTMLCanvasElement, url, {
       width: 92,
       margin: 1,
