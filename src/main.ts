@@ -7,6 +7,7 @@ import {
 import { Largo, TAUNTS, pick } from './ai';
 import {
   initRender, showAttract, buildRound, drawFrame, ndcToWorld, shake, resize, setIntro, setCrt,
+  renderStats,
 } from './render';
 import {
   initAudio, sfx, startDrone, stopDrone, startAlarm, stopAlarm, announce,
@@ -31,6 +32,19 @@ const ui = {
   help: $('help'),
   flash: $('shockFlash'),
 };
+
+// DOM writes only when the value actually changed — the HUD was being
+// rewritten at 60Hz. setTxt compares live DOM; setHTML caches the last string.
+function setTxt(el: HTMLElement, s: string): void {
+  if (el.textContent !== s) el.textContent = s;
+}
+const htmlCache = new WeakMap<HTMLElement, string>();
+function setHTML(el: HTMLElement, s: string): void {
+  if (htmlCache.get(el) !== s) {
+    htmlCache.set(el, s);
+    el.innerHTML = s;
+  }
+}
 
 const SIM_DT = 1 / 60;
 let phase: Phase = 'attract';
@@ -151,11 +165,20 @@ function setPhase(p: Phase): void {
   phaseT = 0;
 }
 
+const shown = { endP: -1, endL: -1 };
 function fmtCash(): void {
-  ui.cashP.innerHTML = `<span class="label">007</span>${dollars(cash.p)}`;
-  ui.cashL.innerHTML = `<span class="label">LARGO</span>${dollars(cash.l)}`;
-  ui.endP.style.width = `${Math.max(0, endurance.p)}%`;
-  ui.endL.style.width = `${Math.max(0, endurance.l)}%`;
+  setHTML(ui.cashP, `<span class="label">007</span>${dollars(cash.p)}`);
+  setHTML(ui.cashL, `<span class="label">LARGO</span>${dollars(cash.l)}`);
+  const ep = Math.max(0, Math.round(endurance.p * 2) / 2);
+  const el = Math.max(0, Math.round(endurance.l * 2) / 2);
+  if (ep !== shown.endP) {
+    shown.endP = ep;
+    ui.endP.style.width = `${ep}%`;
+  }
+  if (el !== shown.endL) {
+    shown.endL = el;
+    ui.endL.style.width = `${el}%`;
+  }
 }
 
 function startMatch(): void {
@@ -203,7 +226,7 @@ function startRound(): void {
   showAttract(false);
   ui.center.textContent = r.name;
   ui.sub.textContent = `FOR ${dollars(r.stake)}`;
-  ui.marquee.innerHTML = '';
+  setHTML(ui.marquee, '');
   ui.taunt.textContent = mp
     ? roundIdx === 3
       ? 'THE FINAL TABLE — FOR THE REST OF THE WORLD'
@@ -320,19 +343,23 @@ function tick(dt: number): void {
   switch (phase) {
     case 'attract': {
       if (attractMode === 'title') {
-        ui.center.textContent = 'DOMINATION';
-        ui.sub.textContent =
+        setTxt(ui.center, 'DOMINATION');
+        setTxt(
+          ui.sub,
           mpWait === 'hosting'
             ? 'TABLE OPEN — AWAITING CHALLENGER'
             : mpWait === 'joining'
               ? 'SEEKING A TABLE…'
-              : 'PRESS ENTER';
-        ui.taunt.textContent = '';
-        ui.help.textContent =
+              : 'PRESS ENTER',
+        );
+        setTxt(ui.taunt, '');
+        setTxt(
+          ui.help,
           `ENTER: VS LARGO · O: HOST TABLE · J: JOIN TABLE · M: MUTE · C: CRT · LINK: ${
             netMode() === 'supabase' ? (netReady() ? 'GLOBAL ◉' : 'GLOBAL …') : 'LOCAL RELAY'
-          }`;
-        ui.marquee.innerHTML = '';
+          }`,
+        );
+        setHTML(ui.marquee, '');
         $('joinInfo').style.display = 'flex';
         if (!mpWait && phaseT > 9) {
           makeDemo();
@@ -342,17 +369,19 @@ function tick(dt: number): void {
         }
       } else if (demo) {
         $('joinInfo').style.display = 'none';
-        ui.center.textContent = '';
-        ui.sub.textContent = 'DEMONSTRATION — PRESS ENTER';
+        setTxt(ui.center, '');
+        setTxt(ui.sub, 'DEMONSTRATION — PRESS ENTER');
         const inputs: Record<Side, SideInputs> = {
           p: demo.aiP.think(demo.duel),
           l: demo.aiL.think(demo.duel),
         };
         step(demo.duel, SIM_DT, inputs, 1, demo.rng);
         const left = Math.max(0, demo.duel.duration - demo.duel.time);
-        ui.marquee.innerHTML =
+        setHTML(
+          ui.marquee,
           `SPAIN — ${dollars(9000)}` +
-          `<span class="stake">DEMO ${demo.duel.strikes.p} — ${demo.duel.strikes.l} · ${left.toFixed(0)}s</span>`;
+            `<span class="stake">DEMO ${demo.duel.strikes.p} — ${demo.duel.strikes.l} · ${left.toFixed(0)}s</span>`,
+        );
         if (demo.duel.over || phaseT > 30) {
           demo = null;
           attractMode = 'title';
@@ -441,14 +470,14 @@ function tick(dt: number): void {
             sendInputWindow(target);
             stallResendAt = stallT + 0.3;
           }
-          if (stallT > 0.6) ui.sub.textContent = 'AWAITING OPPONENT';
+          if (stallT > 0.6) setTxt(ui.sub, 'AWAITING OPPONENT');
           if (stallT > 20) {
             finishMatch(true, 'OPPONENT CONNECTION LOST');
             leaveMp();
           }
           break;
         }
-        if (stallT > 0.6) ui.sub.textContent = '';
+        if (stallT > 0.6) setTxt(ui.sub, '');
         stallT = 0;
         stallResendAt = 0;
         inputs = { p: a, l: b };
@@ -491,8 +520,7 @@ function tick(dt: number): void {
       }
       if (warnT > 0) {
         warnT -= SIM_DT;
-        ui.center.textContent = 'MISSILE INBOUND';
-        if (warnT <= 0) ui.center.textContent = '';
+        setTxt(ui.center, warnT > 0 ? 'MISSILE INBOUND' : '');
       }
 
       if (!mp && !quipShown && duel.time > 18 && warnT <= 0) {
@@ -507,9 +535,11 @@ function tick(dt: number): void {
       }
       const ammo = '▲'.repeat(duel.ammo.p) + '△'.repeat(2 - duel.ammo.p);
       const ammoL = '▲'.repeat(duel.ammo.l) + '△'.repeat(2 - duel.ammo.l);
-      ui.marquee.innerHTML =
+      setHTML(
+        ui.marquee,
         `${r.name} — ${dollars(r.stake)}` +
-        `<span class="stake">${ammo} 007 ${duel.strikes.p} — ${duel.strikes.l} LARGO ${ammoL} · ${left.toFixed(0)}s</span>`;
+          `<span class="stake">${ammo} 007 ${duel.strikes.p} — ${duel.strikes.l} LARGO ${ammoL} · ${left.toFixed(0)}s</span>`,
+      );
 
       if (duel.over && duel.loser) endRound(duel.loser, duel.reason);
       break;
@@ -725,5 +755,6 @@ resize();
   get phone() { return { connected: phoneConnected('p'), held: phoneHeld('p') }; },
   get mp() { return mp ? { role: mp.role, mySide: mp.mySide, seed: mp.seed, duelTick, stallT } : null; },
   get mpWait() { return mpWait; },
+  get renderStats() { return renderStats(); },
   skipToEnd() { if (duel) duel.time = duel.duration - 0.3; },
 };

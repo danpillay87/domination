@@ -1,4 +1,7 @@
 // Three.js vector-wireframe renderer: ortho camera, additive lines, bloom + CRT post.
+// All per-frame dynamic objects (targets, missiles, beams, shields, explosions,
+// reticle) are POOLED — geometry buffers are allocated once and mutated in place.
+// Nothing is created or disposed during a duel frame.
 
 import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
@@ -19,6 +22,9 @@ export const COL = {
 };
 
 const VIEW_Y = 1.6;
+const POOL = { targets: 4, missiles: 4, beams: 6, explosions: 8 };
+const TRAIL_MAX = 26;
+const SHIELD_SEGS = 17;
 
 let renderer: THREE.WebGLRenderer;
 let scene: THREE.Scene;
@@ -29,13 +35,35 @@ let crtPass: ShaderPass;
 let attractGroup: THREE.Group;
 let duelGroup: THREE.Group;
 let staticGroup: THREE.Group; // grid + country + bases, rebuilt per round
-let dynamicGroup: THREE.Group; // rebuilt every frame
 let globe: THREE.Group;
 
 let shakeT = 0;
 let shakeMag = 0;
 let aspect = 1.5;
 let introP: number | null = null;
+
+// Shared materials — one per colour, reused by every pooled object.
+const mat = {
+  p: new THREE.LineBasicMaterial({ color: COL.p }),
+  l: new THREE.LineBasicMaterial({ color: COL.l }),
+  amber: new THREE.LineBasicMaterial({ color: COL.amber }),
+  white: new THREE.LineBasicMaterial({ color: COL.white }),
+  grid: new THREE.LineBasicMaterial({ color: COL.grid }),
+};
+
+interface MissileSlot { head: THREE.LineSegments; trail: THREE.Line; trailPos: THREE.BufferAttribute }
+interface ShieldSlot { line: THREE.Line; pos: THREE.BufferAttribute }
+interface BeamSlot { line: THREE.Line; pos: THREE.BufferAttribute }
+interface TargetSlot { ring: THREE.LineLoop; inner: THREE.LineLoop }
+
+const pool = {
+  targets: [] as TargetSlot[],
+  missiles: [] as MissileSlot[],
+  beams: [] as BeamSlot[],
+  explosions: [] as THREE.LineLoop[],
+  shields: {} as Record<Side, ShieldSlot>,
+  reticle: null as THREE.Group | null,
+};
 
 function easeOutCubic(x: number): number {
   return 1 - Math.pow(1 - x, 3);
@@ -80,22 +108,108 @@ const CRTShader = {
 function line(pts: [number, number][], color: number, closed = false, z = 0): THREE.Line {
   const v = pts.map(([x, y]) => new THREE.Vector3(x, y, z));
   const g = new THREE.BufferGeometry().setFromPoints(v);
-  const m = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 1 });
+  const m = new THREE.LineBasicMaterial({ color });
   return closed ? new THREE.LineLoop(g, m) : new THREE.Line(g, m);
 }
 
-function circle(cx: number, cy: number, r: number, color: number, segs = 28): THREE.LineLoop {
-  const pts: [number, number][] = [];
+function unitCircleGeo(segs: number): THREE.BufferGeometry {
+  const pts: THREE.Vector3[] = [];
   for (let i = 0; i < segs; i++) {
     const a = (i / segs) * Math.PI * 2;
-    pts.push([cx + Math.cos(a) * r, cy + Math.sin(a) * r]);
+    pts.push(new THREE.Vector3(Math.cos(a), Math.sin(a), 0));
   }
-  return line(pts, color, true) as THREE.LineLoop;
+  return new THREE.BufferGeometry().setFromPoints(pts);
+}
+
+function dynamicBuffer(points: number): { geo: THREE.BufferGeometry; pos: THREE.BufferAttribute } {
+  const pos = new THREE.BufferAttribute(new Float32Array(points * 3), 3);
+  pos.setUsage(THREE.DynamicDrawUsage);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', pos);
+  return { geo, pos };
+}
+
+function buildPools(parent: THREE.Group): void {
+  const circle32 = unitCircleGeo(32);
+  const circle12 = unitCircleGeo(12);
+
+  for (let i = 0; i < POOL.targets; i++) {
+    const ring = new THREE.LineLoop(circle32, mat.white);
+    const inner = new THREE.LineLoop(circle12, mat.amber);
+    for (const o of [ring, inner]) {
+      o.visible = false;
+      o.frustumCulled = false;
+      parent.add(o);
+    }
+    pool.targets.push({ ring, inner });
+  }
+
+  const c = 0.035;
+  const headGeo = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(-c, -c, 0), new THREE.Vector3(c, c, 0),
+    new THREE.Vector3(-c, c, 0), new THREE.Vector3(c, -c, 0),
+  ]);
+  for (let i = 0; i < POOL.missiles; i++) {
+    const head = new THREE.LineSegments(headGeo, mat.white);
+    const t = dynamicBuffer(TRAIL_MAX);
+    const trail = new THREE.Line(t.geo, mat.p);
+    for (const o of [head, trail]) {
+      o.visible = false;
+      o.frustumCulled = false;
+      parent.add(o);
+    }
+    pool.missiles.push({ head, trail, trailPos: t.pos });
+  }
+
+  for (let i = 0; i < POOL.beams; i++) {
+    const b = dynamicBuffer(2);
+    const l = new THREE.Line(b.geo, mat.white);
+    l.visible = false;
+    l.frustumCulled = false;
+    parent.add(l);
+    pool.beams.push({ line: l, pos: b.pos });
+  }
+
+  for (let i = 0; i < POOL.explosions; i++) {
+    const e = new THREE.LineLoop(circle32, mat.white);
+    e.visible = false;
+    e.frustumCulled = false;
+    parent.add(e);
+    pool.explosions.push(e);
+  }
+
+  for (const side of ['p', 'l'] as Side[]) {
+    const s = dynamicBuffer(SHIELD_SEGS);
+    const l = new THREE.Line(s.geo, side === 'p' ? mat.p : mat.l);
+    l.visible = false;
+    l.frustumCulled = false;
+    parent.add(l);
+    pool.shields[side] = { line: l, pos: s.pos };
+  }
+
+  const ret = new THREE.Group();
+  const r = 0.05;
+  const ring = new THREE.LineLoop(unitCircleGeo(16), mat.p);
+  ring.scale.setScalar(r);
+  const ticks = new THREE.LineSegments(
+    new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(-r * 1.8, 0, 0), new THREE.Vector3(-r * 0.6, 0, 0),
+      new THREE.Vector3(r * 0.6, 0, 0), new THREE.Vector3(r * 1.8, 0, 0),
+      new THREE.Vector3(0, -r * 1.8, 0), new THREE.Vector3(0, -r * 0.6, 0),
+      new THREE.Vector3(0, r * 0.6, 0), new THREE.Vector3(0, r * 1.8, 0),
+    ]),
+    mat.p,
+  );
+  ret.add(ring, ticks);
+  ret.visible = false;
+  for (const o of [ring, ticks]) o.frustumCulled = false;
+  parent.add(ret);
+  pool.reticle = ret;
 }
 
 export function initRender(canvas: HTMLCanvasElement): void {
   renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-  renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
+  renderer.setPixelRatio(Math.min(1.5, window.devicePixelRatio));
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x01030a);
   camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
@@ -111,27 +225,30 @@ export function initRender(canvas: HTMLCanvasElement): void {
   attractGroup = new THREE.Group();
   duelGroup = new THREE.Group();
   staticGroup = new THREE.Group();
-  dynamicGroup = new THREE.Group();
+  const dynamicGroup = new THREE.Group();
   duelGroup.add(staticGroup, dynamicGroup);
   scene.add(attractGroup, duelGroup);
+  buildPools(dynamicGroup);
 
   // Attract globe: wireframe lat/long sphere, laser-lit.
   globe = new THREE.Group();
   const R = 0.85;
   for (let lat = -60; lat <= 60; lat += 30) {
     const phi = (lat * Math.PI) / 180;
-    const ring = circle(0, 0, R * Math.cos(phi), COL.amber, 48);
+    const ring = new THREE.LineLoop(unitCircleGeo(48), new THREE.LineBasicMaterial({
+      color: COL.amber, transparent: true, opacity: 0.65,
+    }));
+    ring.scale.setScalar(R * Math.cos(phi));
     ring.rotation.x = Math.PI / 2;
     ring.position.y = R * Math.sin(phi);
-    (ring.material as THREE.LineBasicMaterial).opacity = 0.65;
-    (ring.material as THREE.LineBasicMaterial).transparent = true;
     globe.add(ring);
   }
   for (let i = 0; i < 9; i++) {
-    const ring = circle(0, 0, R, COL.l, 48);
+    const ring = new THREE.LineLoop(unitCircleGeo(48), new THREE.LineBasicMaterial({
+      color: COL.l, transparent: true, opacity: 0.5,
+    }));
+    ring.scale.setScalar(R);
     ring.rotation.y = (i / 9) * Math.PI;
-    (ring.material as THREE.LineBasicMaterial).opacity = 0.5;
-    (ring.material as THREE.LineBasicMaterial).transparent = true;
     globe.add(ring);
   }
   globe.rotation.z = 0.28;
@@ -188,7 +305,7 @@ export function buildRound(outline: [number, number][]): void {
     gridPts.push(new THREE.Vector3(-GW, y, -0.01), new THREE.Vector3(GW, y, -0.01));
   }
   const gridGeo = new THREE.BufferGeometry().setFromPoints(gridPts);
-  staticGroup.add(new THREE.LineSegments(gridGeo, new THREE.LineBasicMaterial({ color: COL.grid })));
+  staticGroup.add(new THREE.LineSegments(gridGeo, mat.grid));
 
   // Country
   staticGroup.add(line(outline, COL.amber, true, 0.01));
@@ -226,55 +343,85 @@ export function drawFrame(s: DuelState | null, reticle: { x: number; y: number }
   }
 
   if (s && duelGroup.visible) {
-    clearGroup(dynamicGroup);
-
     // Targets — pulsing rings
-    for (const t of s.targets) {
-      const pulse = TARGET_R * (1 + 0.18 * Math.sin(t.age * 7));
-      dynamicGroup.add(circle(t.x, t.y, pulse, COL.white));
-      dynamicGroup.add(circle(t.x, t.y, pulse * 0.45, COL.amber, 12));
+    for (let i = 0; i < pool.targets.length; i++) {
+      const slot = pool.targets[i];
+      const t = s.targets[i];
+      slot.ring.visible = slot.inner.visible = !!t;
+      if (t) {
+        const pulse = TARGET_R * (1 + 0.18 * Math.sin(t.age * 7));
+        slot.ring.position.set(t.x, t.y, 0.02);
+        slot.ring.scale.setScalar(pulse);
+        slot.inner.position.set(t.x, t.y, 0.02);
+        slot.inner.scale.setScalar(pulse * 0.45);
+      }
     }
 
     // Shields
     for (const side of ['p', 'l'] as Side[]) {
-      const pts: [number, number][] = [];
-      for (let i = -8; i <= 8; i++) {
-        const a = s.shield[side] + (i / 8) * SHIELD_HALF;
-        pts.push(shieldPoint(side, a, SHIELD_R));
+      const slot = pool.shields[side];
+      slot.line.visible = true;
+      for (let i = 0; i < SHIELD_SEGS; i++) {
+        const a = s.shield[side] + ((i - 8) / 8) * SHIELD_HALF;
+        const [x, y] = shieldPoint(side, a, SHIELD_R);
+        slot.pos.setXYZ(i, x, y, 0.03);
       }
-      dynamicGroup.add(line(pts, COL[side], false, 0.03));
+      slot.pos.needsUpdate = true;
     }
 
     // Missiles — head cross + trail
-    for (const m of s.missiles) {
-      const col = COL[m.owner];
-      if (m.trail.length > 1) dynamicGroup.add(line(m.trail, col, false, 0.02));
-      const c = 0.035;
-      dynamicGroup.add(line([[m.x - c, m.y - c], [m.x + c, m.y + c]], COL.white, false, 0.04));
-      dynamicGroup.add(line([[m.x - c, m.y + c], [m.x + c, m.y - c]], COL.white, false, 0.04));
+    for (let i = 0; i < pool.missiles.length; i++) {
+      const slot = pool.missiles[i];
+      const m = s.missiles[i];
+      slot.head.visible = slot.trail.visible = !!m;
+      if (m) {
+        slot.head.position.set(m.x, m.y, 0.04);
+        slot.trail.material = m.owner === 'p' ? mat.p : mat.l;
+        const n = Math.min(m.trail.length, TRAIL_MAX);
+        for (let k = 0; k < n; k++) slot.trailPos.setXYZ(k, m.trail[k][0], m.trail[k][1], 0.02);
+        slot.trail.geometry.setDrawRange(0, n);
+        slot.trailPos.needsUpdate = true;
+      }
     }
 
     // Laser beams
-    for (const b of s.beams) {
-      const from = BASE[b.side];
-      dynamicGroup.add(line([[from.x, from.y], [b.x, b.y]], b.hit ? COL.white : COL[b.side], false, 0.05));
+    for (let i = 0; i < pool.beams.length; i++) {
+      const slot = pool.beams[i];
+      const b = s.beams[i];
+      slot.line.visible = !!b;
+      if (b) {
+        const from = BASE[b.side];
+        slot.line.material = b.hit ? mat.white : b.side === 'p' ? mat.p : mat.l;
+        slot.pos.setXYZ(0, from.x, from.y, 0.05);
+        slot.pos.setXYZ(1, b.x, b.y, 0.05);
+        slot.pos.needsUpdate = true;
+      }
     }
 
     // Explosions — expanding rings
-    for (const e of s.explosions) {
-      const r = (e.big ? 0.3 : 0.14) * (e.age / 0.5) + 0.02;
-      dynamicGroup.add(circle(e.x, e.y, r, e.big ? COL.l : COL.white));
+    for (let i = 0; i < pool.explosions.length; i++) {
+      const obj = pool.explosions[i];
+      const e = s.explosions[i];
+      obj.visible = !!e;
+      if (e) {
+        obj.material = e.big ? mat.l : mat.white;
+        obj.position.set(e.x, e.y, 0.02);
+        obj.scale.setScalar((e.big ? 0.3 : 0.14) * (e.age / 0.5) + 0.02);
+      }
     }
 
     // Player reticle
-    if (reticle) {
-      const r = 0.05;
-      dynamicGroup.add(circle(reticle.x, reticle.y, r, COL.p, 16));
-      dynamicGroup.add(line([[reticle.x - r * 1.8, reticle.y], [reticle.x - r * 0.6, reticle.y]], COL.p));
-      dynamicGroup.add(line([[reticle.x + r * 0.6, reticle.y], [reticle.x + r * 1.8, reticle.y]], COL.p));
-      dynamicGroup.add(line([[reticle.x, reticle.y - r * 1.8], [reticle.x, reticle.y - r * 0.6]], COL.p));
-      dynamicGroup.add(line([[reticle.x, reticle.y + r * 0.6], [reticle.x, reticle.y + r * 1.8]], COL.p));
+    if (pool.reticle) {
+      pool.reticle.visible = !!reticle;
+      if (reticle) pool.reticle.position.set(reticle.x, reticle.y, 0.05);
     }
+  } else {
+    if (pool.reticle) pool.reticle.visible = false;
+    for (const side of ['p', 'l'] as Side[]) pool.shields[side].line.visible = false;
+    for (const t of pool.targets) t.ring.visible = t.inner.visible = false;
+    for (const m of pool.missiles) m.head.visible = m.trail.visible = false;
+    for (const b of pool.beams) b.line.visible = false;
+    for (const e of pool.explosions) e.visible = false;
   }
 
   // Screen shake
@@ -287,7 +434,8 @@ export function drawFrame(s: DuelState | null, reticle: { x: number; y: number }
     camera.position.y = 0;
   }
 
-  composer.render();
+  // Don't burn GPU on a hidden window — the sim keeps ticking regardless.
+  if (!document.hidden) composer.render();
 }
 
 export function shake(mag: number, dur = 0.6): void {
@@ -297,4 +445,11 @@ export function shake(mag: number, dur = 0.6): void {
 
 export function setCrt(on: boolean): void {
   crtPass.enabled = on;
+}
+
+export function renderStats(): { geometries: number; textures: number } {
+  return {
+    geometries: renderer.info.memory.geometries,
+    textures: renderer.info.memory.textures,
+  };
 }

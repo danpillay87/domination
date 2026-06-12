@@ -6,6 +6,7 @@ let ctx: AudioContext | null = null;
 let master: GainNode | null = null;
 let droneNodes: AudioScheduledSourceNode[] = [];
 let alarmTimer: number | null = null;
+let noiseBuf: AudioBuffer | null = null; // shared — never re-allocated per hit
 
 let muted = false;
 
@@ -21,6 +22,27 @@ export function initAudio(): void {
   master = ctx.createGain();
   master.gain.value = muted ? 0 : 0.35;
   master.connect(comp).connect(ctx.destination);
+
+  noiseBuf = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
+  const d = noiseBuf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+}
+
+function noise(dur: number, filterType: BiquadFilterType, filterHz: number, vol: number, sweepTo?: number): void {
+  if (!ctx || !master || !noiseBuf) return;
+  const t = ctx.currentTime;
+  const src = ctx.createBufferSource();
+  src.buffer = noiseBuf;
+  const f = ctx.createBiquadFilter();
+  f.type = filterType;
+  f.frequency.setValueAtTime(filterHz, t);
+  if (sweepTo) f.frequency.exponentialRampToValueAtTime(sweepTo, t + dur);
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(vol, t + 0.008);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  src.connect(f).connect(g).connect(master);
+  src.start(t, Math.random() * 0.5, dur + 0.05);
 }
 
 export function setMuted(b: boolean): void {
@@ -70,25 +92,7 @@ export const sfx = {
   zap: () => env(1400, 'triangle', 0.13, 0.11, 180),
   miss: () => env(220, 'triangle', 0.09, 0.05, 110),
   launch: () => env(110, 'triangle', 0.7, 0.16, 38),
-  boom: () => {
-    if (!ctx || !master) return;
-    const t = ctx.currentTime;
-    const buf = ctx.createBuffer(1, ctx.sampleRate * 0.45, ctx.sampleRate);
-    const d = buf.getChannelData(0);
-    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length) ** 2;
-    const src = ctx.createBufferSource();
-    src.buffer = buf;
-    const f = ctx.createBiquadFilter();
-    f.type = 'lowpass';
-    f.frequency.setValueAtTime(500, t);
-    f.frequency.exponentialRampToValueAtTime(120, t + 0.4);
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(0.0001, t);
-    g.gain.linearRampToValueAtTime(0.4, t + 0.008);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.42);
-    src.connect(f).connect(g).connect(master);
-    src.start(t);
-  },
+  boom: () => noise(0.42, 'lowpass', 500, 0.4, 120),
   win: () => {
     env(523, 'triangle', 0.14, 0.1);
     setTimeout(() => env(659, 'triangle', 0.14, 0.1), 140);
@@ -102,22 +106,7 @@ export const sfx = {
 };
 
 function hat(): void {
-  if (!ctx || !master) return;
-  const t = ctx.currentTime;
-  const buf = ctx.createBuffer(1, ctx.sampleRate * 0.03, ctx.sampleRate);
-  const d = buf.getChannelData(0);
-  for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length);
-  const src = ctx.createBufferSource();
-  src.buffer = buf;
-  const f = ctx.createBiquadFilter();
-  f.type = 'highpass';
-  f.frequency.value = 6000;
-  const g = ctx.createGain();
-  g.gain.setValueAtTime(0.0001, t);
-  g.gain.linearRampToValueAtTime(0.03, t + 0.004);
-  g.gain.exponentialRampToValueAtTime(0.0001, t + 0.03);
-  src.connect(f).connect(g).connect(master);
-  src.start(t);
+  noise(0.03, 'highpass', 6000, 0.03);
 }
 
 // Original 8-step bass figure, transposed up a semitone per ladder rung,

@@ -28,13 +28,23 @@ function connect(): void {
     };
     ws.onclose = () => {
       ws = null;
-      setTimeout(connect, 3000);
+      retryMs = Math.min(retryMs * 2, 30000);
+      setTimeout(connect, retryMs);
+    };
+    ws.onopen = () => {
+      retryMs = 3000;
     };
     ws.onerror = () => ws?.close();
   } catch {}
 }
 
+let retryMs = 3000;
+
 export function initHaptics(): void {
+  // The /grip-ws relay only exists on the dev server. In a deployed build the
+  // socket would fail-and-retry forever — phone grips move to the cloud channel
+  // when that milestone lands. Until then: dev only.
+  if (!import.meta.env.DEV) return;
   connect();
 }
 

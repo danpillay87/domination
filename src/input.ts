@@ -64,30 +64,35 @@ export interface PadState {
   grip: boolean;
 }
 
-let prevPad: boolean[] = [];
+// Polled at 60Hz — reuse one state object and one prev-button array, no allocs.
+const prevPad = new Array<boolean>(8).fill(false);
+const padState: PadState = {
+  connected: false, shieldDir: 0, aimDX: 0, aimDY: 0,
+  fire: false, launch: false, grip: false,
+};
 
 export function pollPad(): PadState {
-  const none: PadState = {
-    connected: false, shieldDir: 0, aimDX: 0, aimDY: 0,
-    fire: false, launch: false, grip: false,
-  };
   const pads = navigator.getGamepads?.() ?? [];
   let p: Gamepad | null = null;
   for (const g of pads) if (g && g.connected) { p = g; break; }
-  if (!p) { prevPad = []; return none; }
+  if (!p) {
+    padState.connected = false;
+    padState.shieldDir = padState.aimDX = padState.aimDY = 0;
+    padState.fire = padState.launch = padState.grip = false;
+    prevPad.fill(false);
+    return padState;
+  }
   const dz = (v: number) => (Math.abs(v) > 0.25 ? v : 0);
   const btn = (i: number) => !!p.buttons[i] && (p.buttons[i].pressed || p.buttons[i].value > 0.5);
-  const state: PadState = {
-    connected: true,
-    shieldDir: Math.sign(dz(p.axes[0] ?? 0)),
-    aimDX: dz(p.axes[2] ?? 0),
-    aimDY: -dz(p.axes[3] ?? 0),
-    fire: btn(7) && !prevPad[7],
-    launch: (btn(0) && !prevPad[0]) || (btn(5) && !prevPad[5]),
-    grip: btn(6) || btn(4),
-  };
-  prevPad = Array.from({ length: 8 }, (_, i) => btn(i));
-  return state;
+  padState.connected = true;
+  padState.shieldDir = Math.sign(dz(p.axes[0] ?? 0));
+  padState.aimDX = dz(p.axes[2] ?? 0);
+  padState.aimDY = -dz(p.axes[3] ?? 0);
+  padState.fire = btn(7) && !prevPad[7];
+  padState.launch = (btn(0) && !prevPad[0]) || (btn(5) && !prevPad[5]);
+  padState.grip = btn(6) || btn(4);
+  for (let i = 0; i < 8; i++) prevPad[i] = btn(i);
+  return padState;
 }
 
 export function rumble(intensity: number, ms: number): void {
