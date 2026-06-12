@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DOMINATION</title>
+  <style>
+    :root {
+      --p1: #2ee6ff;
+      --p2: #ff6a1f;
+      --amber: #ffd24a;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; background: #0a0806; overflow: hidden; }
+    body {
+      font-family: "Consolas", "Courier New", monospace;
+      display: flex; align-items: center; justify-content: center;
+      background: radial-gradient(ellipse at center, #1a1410 0%, #060403 75%);
+    }
+    #frame {
+      position: relative;
+      width: min(96vw, calc(96vh * 1.5));
+      aspect-ratio: 3 / 2;
+      border-radius: 18px;
+      padding: 14px;
+      background: linear-gradient(160deg, #3a2a18, #181008 55%, #2c2012);
+      box-shadow: 0 0 80px #000, inset 0 0 4px #6b4f2a;
+      border: 1px solid #5a4326;
+    }
+    #crt {
+      position: relative; width: 100%; height: 100%;
+      border-radius: 10px; overflow: hidden;
+      background: #000;
+      box-shadow: inset 0 0 60px rgba(0,0,0,0.9);
+    }
+    canvas { display: block; width: 100%; height: 100%; }
+
+    .hud { position: absolute; inset: 0; pointer-events: none; }
+    .hud * { text-shadow: 0 0 8px currentColor; }
+
+    #marquee {
+      position: absolute; top: 2.5%; left: 0; right: 0; text-align: center;
+      color: var(--amber); font-size: clamp(12px, 2.2vmin, 22px); letter-spacing: 0.35em;
+    }
+    #marquee .stake { display: block; font-size: 1.5em; margin-top: 0.2em; letter-spacing: 0.2em; }
+
+    .cash { position: absolute; bottom: 3%; font-size: clamp(11px, 2vmin, 20px); letter-spacing: 0.15em; }
+    #cashP { left: 4%; color: var(--p1); }
+    #cashL { right: 4%; color: var(--p2); text-align: right; }
+    .cash .label { font-size: 0.7em; opacity: 0.8; display: block; }
+
+    .endwrap { position: absolute; top: 12%; width: 22%; height: 10px; border: 1px solid #444; }
+    #endP { left: 4%; }
+    #endL { right: 4%; }
+    .endbar { height: 100%; transition: width 0.1s linear; }
+    #endP .endbar { background: var(--p1); width: 100%; box-shadow: 0 0 10px var(--p1); }
+    #endL .endbar { background: var(--p2); width: 100%; box-shadow: 0 0 10px var(--p2); }
+    .endwrap .tag { position: absolute; top: -1.6em; font-size: clamp(9px, 1.5vmin, 13px); color: #888; letter-spacing: 0.2em; }
+    #endL .tag { right: 0; }
+
+    #centerMsg {
+      position: absolute; top: 38%; left: 0; right: 0; text-align: center;
+      color: #fff; font-size: clamp(18px, 5vmin, 54px); letter-spacing: 0.4em;
+      white-space: pre-line; line-height: 1.6;
+    }
+    #subMsg {
+      position: absolute; top: 62%; left: 0; right: 0; text-align: center;
+      color: var(--amber); font-size: clamp(11px, 2vmin, 20px); letter-spacing: 0.3em;
+      animation: blink 1.2s steps(2) infinite;
+    }
+    @keyframes blink { 50% { opacity: 0; } }
+
+    #taunt {
+      position: absolute; bottom: 10%; left: 0; right: 0; text-align: center;
+      color: var(--p2); font-size: clamp(10px, 1.8vmin, 17px); letter-spacing: 0.2em;
+      opacity: 0.95;
+    }
+    #help {
+      position: absolute; bottom: 1%; left: 0; right: 0; text-align: center;
+      color: #5a5a5a; font-size: clamp(8px, 1.3vmin, 12px); letter-spacing: 0.15em;
+    }
+
+    #shockFlash {
+      position: absolute; inset: 0; background: #ff2200; opacity: 0; pointer-events: none;
+      mix-blend-mode: screen;
+    }
+    #scanfx {
+      position: absolute; inset: 0; pointer-events: none; border-radius: 10px;
+      background: repeating-linear-gradient(0deg, rgba(0,0,0,0.18) 0 1px, transparent 1px 3px);
+      mix-blend-mode: multiply;
+    }
+  </style>
+</head>
+<body>
+  <div id="frame">
+    <div id="crt">
+      <canvas id="game"></canvas>
+      <div class="hud">
+        <div id="marquee"></div>
+        <div class="endwrap" id="endP"><span class="tag">007 — ENDURANCE</span><div class="endbar"></div></div>
+        <div class="endwrap" id="endL"><span class="tag">LARGO — ENDURANCE</span><div class="endbar"></div></div>
+        <div class="cash" id="cashP"><span class="label">007</span>$0</div>
+        <div class="cash" id="cashL"><span class="label">LARGO</span>$0</div>
+        <div id="centerMsg"></div>
+        <div id="subMsg"></div>
+        <div id="taunt"></div>
+        <div id="help"></div>
+        <div id="shockFlash"></div>
+        <div id="scanfx"></div>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
