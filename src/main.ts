@@ -13,6 +13,7 @@ import {
   startMusic, stopMusic, setMuted,
 } from './audio';
 import { initHaptics, phoneConnected, phoneHeld, sendShock } from './haptics';
+import { netInit, netOn, netSend, type NetMsg } from './net';
 import QRCode from 'qrcode';
 
 type Phase = 'attract' | 'intro' | 'duel' | 'shock' | 'over';
@@ -64,6 +65,57 @@ const padRet = { x: 0, y: 0 };
 let lastDevice: 'mouse' | 'pad' = 'mouse';
 let currentReticle: { x: number; y: number } | null = null;
 
+// Multiplayer: lockstep over the relay. Host plays 007 (bottom), guest plays
+// LARGO's seat (top). Inputs for tick T are exchanged at T - INPUT_DELAY.
+const INPUT_DELAY = 4;
+let mp: { role: 'host' | 'guest'; mySide: Side; seed: number } | null = null;
+let mpWait: 'hosting' | 'joining' | null = null;
+let mpHelloTimer: number | null = null;
+let duelTick = 0;
+let stallT = 0;
+const inBuf: Record<Side, Map<number, SideInputs>> = { p: new Map(), l: new Map() };
+let mpShockResult: { outcome: 'release' | 'collapse' | 'endured'; endurance: number } | null = null;
+const mySums = new Map<number, number>();
+
+function my(): Side {
+  return mp ? mp.mySide : 'p';
+}
+
+function oppName(): string {
+  return mp ? 'YOUR OPPONENT' : 'LARGO';
+}
+
+const NEUTRAL: SideInputs = { shieldDir: 0, fireAt: null, launch: false };
+
+function stopHello(): void {
+  if (mpHelloTimer !== null) window.clearInterval(mpHelloTimer);
+  mpHelloTimer = null;
+}
+
+function beginMpMatch(role: 'host' | 'guest', seed: number): void {
+  stopHello();
+  mpWait = null;
+  mp = { role, mySide: role === 'host' ? 'p' : 'l', seed };
+  initAudio();
+  roundIdx = 0;
+  cash = { p: 0, l: 0 };
+  endurance = { p: 100, l: 100 };
+  matchWon = false;
+  demo = null;
+  attractMode = 'title';
+  ui.flash.style.background = '#ff2200';
+  ui.flash.style.opacity = '0';
+  rng = mulberry32(seed);
+  startRound();
+}
+
+function leaveMp(): void {
+  if (mp) netSend({ t: 'mp-bye' });
+  mp = null;
+  mpWait = null;
+  stopHello();
+}
+
 const settings: { muted: boolean; crt: boolean } = (() => {
   try {
     return { muted: false, crt: true, ...JSON.parse(localStorage.getItem('dom.settings') ?? '{}') };
@@ -95,6 +147,8 @@ function fmtCash(): void {
 }
 
 function startMatch(): void {
+  mpWait = null;
+  stopHello();
   roundIdx = 0;
   cash = { p: 0, l: 0 };
   endurance = { p: 100, l: 100 };
@@ -121,15 +175,32 @@ function makeDemo(): void {
 function startRound(): void {
   $('joinInfo').style.display = 'none';
   const r = ROUNDS[roundIdx];
-  duel = newDuel(r, roundIdx, rng);
+  duel = newDuel(r, roundIdx, rng, !!mp);
   largo = new Largo('l', roundIdx, rng);
+  duelTick = 0;
+  stallT = 0;
+  mpShockResult = null;
+  mySums.clear();
+  inBuf.p.clear();
+  inBuf.l.clear();
+  for (let t = 0; t < INPUT_DELAY; t++) {
+    inBuf.p.set(t, NEUTRAL);
+    inBuf.l.set(t, NEUTRAL);
+  }
   buildRound(duel.outline);
   showAttract(false);
   ui.center.textContent = r.name;
   ui.sub.textContent = `FOR ${dollars(r.stake)}`;
   ui.marquee.innerHTML = '';
-  ui.taunt.textContent =
-    roundIdx === 0 ? pick(TAUNTS.intro, rng) : roundIdx === 3 ? TAUNTS.finalRound[0] : '';
+  ui.taunt.textContent = mp
+    ? roundIdx === 3
+      ? 'THE FINAL TABLE — FOR THE REST OF THE WORLD'
+      : ''
+    : roundIdx === 0
+      ? pick(TAUNTS.intro, rng)
+      : roundIdx === 3
+        ? TAUNTS.finalRound[0]
+        : '';
   ui.help.textContent = 'MOUSE: AIM+FIRE LASER · A/D: SHIELD · 1,2: MISSILES · NEVER RELEASE THE GRIPS';
   announce(`${r.name}. ${r.stake.toLocaleString('en-US')} dollars.`);
   warnT = 0;
@@ -173,13 +244,16 @@ function endRound(loser: Side, reason: DuelState['reason']): void {
     outcome: null,
     rumbleAt: 0,
   };
-  ui.flash.style.background = loser === 'p' ? '#ff2200' : '#ff7a00';
+  ui.flash.style.background = loser === my() ? '#ff2200' : '#ff7a00';
   sendShock(loser, roundIdx, 3000);
   ui.center.textContent =
-    loser === 'p' ? `${r.name} FALLS TO LARGO` : `${r.name} IS YOURS`;
-  ui.sub.textContent = loser === 'p' ? 'HOLD [SPACE] — ENDURE THE PAIN' : '';
-  ui.taunt.textContent =
-    loser === 'p' ? pick(TAUNTS.playerShock, rng) : pick(TAUNTS.largoShock, rng);
+    loser === my() ? `${r.name} FALLS TO ${oppName()}` : `${r.name} IS YOURS`;
+  ui.sub.textContent = loser === my() ? 'HOLD [SPACE] — ENDURE THE PAIN' : '';
+  ui.taunt.textContent = mp
+    ? ''
+    : loser === 'p'
+      ? pick(TAUNTS.playerShock, rng)
+      : pick(TAUNTS.largoShock, rng);
   startAlarm();
   setPhase('shock');
 }
@@ -191,7 +265,7 @@ function finishMatch(won: boolean, headline: string): void {
   ui.flash.style.opacity = '0';
   matchWon = won;
   fmtCash();
-  ui.center.textContent = `${headline}\n${won ? 'THE WORLD IS YOURS' : 'DOMINATION: LARGO'}`;
+  ui.center.textContent = `${headline}\n${won ? 'THE WORLD IS YOURS' : mp ? 'THE TABLE IS LOST' : 'DOMINATION: LARGO'}`;
   ui.sub.textContent = 'PRESS ENTER TO PLAY AGAIN';
   ui.help.textContent = `FINAL — 007 ${dollars(cash.p)} · LARGO ${dollars(cash.l)}`;
   if (won) sfx.win();
@@ -205,7 +279,11 @@ function afterShock(): void {
   shock = null;
   if (roundIdx === 3) {
     // Ladder complete — the world round decides it.
-    finishMatch(wasVictim === 'l', wasVictim === 'l' ? 'LARGO ENDURES, BUT THE WORLD IS LOST' : 'YOU ENDURED — BUT THE WORLD IS HIS');
+    const won = wasVictim !== my();
+    finishMatch(
+      won,
+      won ? `${oppName()} ENDURES, BUT THE WORLD IS LOST` : 'YOU ENDURED — BUT THE WORLD IS THEIRS',
+    );
     return;
   }
   roundIdx++;
@@ -231,13 +309,18 @@ function tick(dt: number): void {
     case 'attract': {
       if (attractMode === 'title') {
         ui.center.textContent = 'DOMINATION';
-        ui.sub.textContent = 'PRESS ENTER';
+        ui.sub.textContent =
+          mpWait === 'hosting'
+            ? 'TABLE OPEN — AWAITING CHALLENGER'
+            : mpWait === 'joining'
+              ? 'SEEKING A TABLE…'
+              : 'PRESS ENTER';
         ui.taunt.textContent = '';
         ui.help.textContent =
-          'A GAME OF POWER · THE LOSER FEELS PAIN · M: MUTE · C: CRT · SPAIN $9,000 — THE WORLD $325,000';
+          'ENTER: VS LARGO · O: HOST TABLE · J: JOIN TABLE · M: MUTE · C: CRT · THE LOSER FEELS PAIN';
         ui.marquee.innerHTML = '';
         $('joinInfo').style.display = 'flex';
-        if (phaseT > 9) {
+        if (!mpWait && phaseT > 9) {
           makeDemo();
           showAttract(false);
           attractMode = 'demo';
@@ -263,6 +346,32 @@ function tick(dt: number): void {
           setPhase('attract');
         }
       }
+      // Lobby keys work from the title AND mid-demonstration.
+      if (pressed('o') || pressed('j') || pressed('escape')) {
+        if (attractMode === 'demo') {
+          demo = null;
+          attractMode = 'title';
+          showAttract(true);
+          setPhase('attract');
+        }
+        if (pressed('o')) {
+          mpWait = mpWait === 'hosting' ? null : 'hosting';
+          stopHello();
+        } else if (pressed('j')) {
+          if (mpWait === 'joining') {
+            mpWait = null;
+            stopHello();
+          } else {
+            mpWait = 'joining';
+            stopHello();
+            netSend({ t: 'mp-hello' });
+            mpHelloTimer = window.setInterval(() => netSend({ t: 'mp-hello' }), 1200);
+          }
+        } else {
+          mpWait = null;
+          stopHello();
+        }
+      }
       if (pressed('enter')) {
         initAudio();
         startMatch();
@@ -271,7 +380,8 @@ function tick(dt: number): void {
     }
     case 'intro': {
       setIntro(Math.min(1, phaseT / 3));
-      if (phaseT > 3.0 || pressed('enter')) beginDuel();
+      // No skip in multiplayer — both clients must enter the duel in lockstep.
+      if (phaseT > 3.0 || (!mp && pressed('enter'))) beginDuel();
       break;
     }
     case 'duel': {
@@ -290,7 +400,7 @@ function tick(dt: number): void {
       const w = ndcToWorld(mouse.x, mouse.y);
       currentReticle = lastDevice === 'pad' ? { x: padRet.x, y: padRet.y } : w;
       const fire = consumeFire();
-      const pInputs: SideInputs = {
+      const myIn: SideInputs = {
         shieldDir:
           (key('d') || key('arrowright') ? 1 : 0) +
           (key('a') || key('arrowleft') ? -1 : 0) +
@@ -298,9 +408,43 @@ function tick(dt: number): void {
         fireAt: fire ? { x: w.x, y: w.y } : pad.fire ? { x: padRet.x, y: padRet.y } : null,
         launch: pressed('1') || pressed('2') || pressed('e') || pad.launch,
       };
-      pInputs.shieldDir = Math.max(-1, Math.min(1, pInputs.shieldDir));
-      const inputs: Record<Side, SideInputs> = { p: pInputs, l: largo.think(duel) };
+      myIn.shieldDir = Math.max(-1, Math.min(1, myIn.shieldDir));
+
+      let inputs: Record<Side, SideInputs>;
+      if (mp) {
+        const target = duelTick + INPUT_DELAY;
+        if (!inBuf[mp.mySide].has(target)) {
+          inBuf[mp.mySide].set(target, myIn);
+          netSend({ t: 'mp-in', side: mp.mySide, tick: target, in: myIn });
+        }
+        const a = inBuf.p.get(duelTick);
+        const b = inBuf.l.get(duelTick);
+        if (!a || !b) {
+          stallT += dt;
+          if (stallT > 0.6) ui.sub.textContent = 'AWAITING OPPONENT';
+          if (stallT > 20) {
+            finishMatch(true, 'OPPONENT CONNECTION LOST');
+            leaveMp();
+          }
+          break;
+        }
+        if (stallT > 0.6) ui.sub.textContent = '';
+        stallT = 0;
+        inputs = { p: a, l: b };
+        inBuf.p.delete(duelTick);
+        inBuf.l.delete(duelTick);
+      } else {
+        inputs = { p: myIn, l: largo.think(duel) };
+      }
       step(duel, SIM_DT, inputs, roundIdx, rng);
+      duelTick++;
+      if (mp && duelTick % 300 === 0 && duel && !duel.over) {
+        const sum =
+          duel.strikes.p * 1e6 + duel.strikes.l * 1e3 + duel.missiles.length * 10 + duel.targets.length;
+        mySums.set(duelTick, sum);
+        netSend({ t: 'mp-sum', tick: duelTick, sum });
+        for (const k of mySums.keys()) if (k < duelTick - 1200) mySums.delete(k);
+      }
 
       for (const ev of duel.events) {
         if (ev === 'blip') sfx.blip();
@@ -314,9 +458,10 @@ function tick(dt: number): void {
         }
       }
 
-      // Largo launched — warn the defender.
-      if (duel.ammo.l < prevLargoAmmo) {
-        prevLargoAmmo = duel.ammo.l;
+      // Opponent launched — warn the defender.
+      const oppSide: Side = my() === 'p' ? 'l' : 'p';
+      if (duel.ammo[oppSide] < prevLargoAmmo) {
+        prevLargoAmmo = duel.ammo[oppSide];
         warnT = 1.4;
         sfx.warn();
       }
@@ -326,7 +471,7 @@ function tick(dt: number): void {
         if (warnT <= 0) ui.center.textContent = '';
       }
 
-      if (!quipShown && duel.time > 18 && warnT <= 0) {
+      if (!mp && !quipShown && duel.time > 18 && warnT <= 0) {
         quipShown = true;
         ui.taunt.textContent = pick(TAUNTS.duel, rng);
       }
@@ -349,43 +494,74 @@ function tick(dt: number): void {
       if (!shock) break;
       shock.t += dt;
       const rate = shock.drain / shock.dur;
+      const meVictim = shock.victim === my();
 
-      if (shock.victim === 'p') {
-        const gripping = key(' ') || pollPad().grip || (phoneConnected('p') && phoneHeld('p'));
+      if (meVictim) {
+        const s = shock.victim;
+        const gripping = key(' ') || pollPad().grip || (phoneConnected(s) && phoneHeld(s));
         if (!gripping && shock.t > 0.25) shock.outcome = 'release';
-        endurance.p -= rate * dt;
-        if (endurance.p <= 0) shock.outcome = 'collapse';
+        endurance[s] -= rate * dt;
+        if (endurance[s] <= 0) shock.outcome = 'collapse';
         ui.flash.style.opacity = String(0.25 + 0.3 * Math.abs(Math.sin(shock.t * 26)));
         shake(0.06, 0.2);
         if (shock.t > shock.rumbleAt) {
           rumble(Math.min(1, 0.4 + roundIdx * 0.2), 180);
           shock.rumbleAt = shock.t + 0.2;
         }
+        if (shock.t >= shock.dur && !shock.outcome) shock.outcome = 'endured';
+        if (mp && shock.outcome) {
+          netSend({ t: 'mp-shock', outcome: shock.outcome, endurance: endurance[s] });
+        }
       } else {
-        endurance.l -= rate * dt;
+        endurance[shock.victim] -= rate * dt;
         ui.flash.style.opacity = String(0.08 + 0.1 * Math.abs(Math.sin(shock.t * 18)));
-        if (endurance.l <= 0) shock.outcome = 'collapse';
+        if (mp) {
+          if (mpShockResult) {
+            endurance[shock.victim] = mpShockResult.endurance;
+            shock.outcome = mpShockResult.outcome;
+            mpShockResult = null;
+          } else if (shock.t > shock.dur + 4) {
+            shock.outcome = 'endured'; // opponent silent — assume survival, stall handling catches the rest
+          }
+        } else {
+          if (endurance.l <= 0) shock.outcome = 'collapse';
+          if (shock.t >= shock.dur && !shock.outcome) shock.outcome = 'endured';
+        }
       }
       fmtCash();
 
-      if (shock.outcome === 'release' || (shock.outcome === 'collapse' && shock.victim === 'p')) {
-        finishMatch(false, shock.outcome === 'release' ? 'YOU RELEASED YOUR GRIPS' : 'YOU COLLAPSED');
+      if (shock.outcome === 'release' || shock.outcome === 'collapse') {
+        const iLost = shock.victim === my();
+        const headline = iLost
+          ? shock.outcome === 'release'
+            ? 'YOU RELEASED YOUR GRIPS'
+            : 'YOU COLLAPSED'
+          : mp
+            ? shock.outcome === 'release'
+              ? 'YOUR OPPONENT RELEASES'
+              : 'YOUR OPPONENT COLLAPSES'
+            : 'LARGO COLLAPSES';
+        finishMatch(!iLost, headline);
         shock = null;
         break;
       }
-      if (shock.outcome === 'collapse' && shock.victim === 'l') {
-        finishMatch(true, 'LARGO COLLAPSES');
-        shock = null;
-        break;
-      }
-      if (shock.t >= shock.dur) {
-        shock.outcome = 'endured';
+      if (shock.outcome === 'endured') {
         afterShock();
       }
       break;
     }
     case 'over': {
-      if (pressed('enter') && phaseT > 1) startMatch();
+      if (pressed('enter') && phaseT > 1) {
+        if (mp) {
+          // Back to the title — a fresh table needs a fresh handshake.
+          leaveMp();
+          attractMode = 'title';
+          showAttract(true);
+          setPhase('attract');
+        } else {
+          startMatch();
+        }
+      }
       break;
     }
   }
@@ -398,6 +574,57 @@ const canvas = document.getElementById('game') as HTMLCanvasElement;
 initRender(canvas);
 initInput(canvas, () => initAudio());
 initHaptics();
+netInit();
+netOn((m: NetMsg) => {
+  switch (m.t) {
+    case 'mp-hello': {
+      if (mpWait === 'hosting' && phase === 'attract') {
+        const seed = (Math.random() * 1e9) | 0;
+        netSend({ t: 'mp-start', seed });
+        beginMpMatch('host', seed);
+      }
+      break;
+    }
+    case 'mp-start': {
+      if (mpWait === 'joining' && typeof m.seed === 'number') {
+        beginMpMatch('guest', m.seed);
+      }
+      break;
+    }
+    case 'mp-in': {
+      const side = m.side as Side;
+      if (mp && side !== mp.mySide && (side === 'p' || side === 'l') && typeof m.tick === 'number') {
+        inBuf[side].set(m.tick, m.in as SideInputs);
+      }
+      break;
+    }
+    case 'mp-shock': {
+      if (mp && typeof m.endurance === 'number') {
+        mpShockResult = {
+          outcome: m.outcome as 'release' | 'collapse' | 'endured',
+          endurance: m.endurance,
+        };
+      }
+      break;
+    }
+    case 'mp-sum': {
+      if (mp && typeof m.tick === 'number' && typeof m.sum === 'number') {
+        const mine = mySums.get(m.tick);
+        if (mine !== undefined && mine !== m.sum) {
+          ui.taunt.textContent = 'SYNC DRIFT DETECTED — RESULT MAY DIVERGE';
+        }
+      }
+      break;
+    }
+    case 'mp-bye': {
+      if (mp && phase !== 'over') {
+        finishMatch(true, 'YOUR OPPONENT LEFT THE TABLE');
+        leaveMp();
+      }
+      break;
+    }
+  }
+});
 showAttract(true);
 setMuted(settings.muted);
 setCrt(settings.crt);
@@ -458,5 +685,7 @@ resize();
   get demo() { return demo; },
   get settings() { return settings; },
   get phone() { return { connected: phoneConnected('p'), held: phoneHeld('p') }; },
+  get mp() { return mp ? { role: mp.role, mySide: mp.mySide, seed: mp.seed, duelTick, stallT } : null; },
+  get mpWait() { return mpWait; },
   skipToEnd() { if (duel) duel.time = duel.duration - 0.3; },
 };

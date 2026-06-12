@@ -54,6 +54,7 @@ export interface DuelState {
   cooldown: Record<Side, number>;
   spawnIn: number;
   nextId: number;
+  pvp: boolean; // human vs human — no scripted crack
   crackTimer: number; // round-3 Largo endurance crack
   over: boolean;
   loser: Side | null;
@@ -87,7 +88,7 @@ export function shieldPoint(side: Side, angle: number, r = SHIELD_R): [number, n
   return [b.x + Math.sin(angle) * r, b.y + Math.cos(angle) * r * forward(side)];
 }
 
-export function newDuel(round: Round, roundIdx: number, rng: () => number): DuelState {
+export function newDuel(round: Round, roundIdx: number, rng: () => number, pvp = false): DuelState {
   const outline = round.outline.map(
     ([x, y]) => [x * MAP_W, y * MAP_H] as [number, number],
   );
@@ -105,6 +106,7 @@ export function newDuel(round: Round, roundIdx: number, rng: () => number): Duel
     cooldown: { p: 0, l: 0 },
     spawnIn: 1.2,
     nextId: 1,
+    pvp,
     crackTimer: 0,
     over: false,
     loser: null,
@@ -242,7 +244,7 @@ export function step(
   }
 
   // Final round: Largo's nerve can crack if 007 sustains a clear lead.
-  if (roundIdx === 3 && s.strikes.p - s.strikes.l >= 2) {
+  if (!s.pvp && roundIdx === 3 && s.strikes.p - s.strikes.l >= 2) {
     s.crackTimer += dt;
     if (s.crackTimer > 6) {
       s.over = true;
