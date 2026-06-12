@@ -92,13 +92,25 @@
     #joinInfo canvas { image-rendering: pixelated; opacity: 0.85; }
     #joinInfo .lines span { display: block; }
     #joinInfo .lines .url { color: var(--amber); }
+    #rules {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      display: none; width: min(76%, 880px); padding: 2.2em 2.6em;
+      background: rgba(2, 4, 10, 0.92); border: 1px solid var(--amber);
+      box-shadow: 0 0 30px -8px var(--amber); color: #cdb87a;
+      font-size: clamp(10px, 1.75vmin, 16px); line-height: 1.75; letter-spacing: 0.08em;
+      text-align: left;
+    }
+    #rules b { display: block; text-align: center; color: var(--amber); letter-spacing: 0.4em; margin-bottom: 0.8em; font-weight: normal; font-size: 1.25em; }
+    #rules p { margin: 0.55em 0; }
+    #rules i { color: var(--amber); font-style: normal; }
+    #rules .q { display: block; text-align: center; color: #777; font-size: 0.85em; margin-top: 0.6em; }
     #scanfx {
       position: absolute; inset: 0; pointer-events: none; border-radius: 10px;
       background: repeating-linear-gradient(0deg, rgba(0,0,0,0.18) 0 1px, transparent 1px 3px);
       mix-blend-mode: multiply;
     }
   </style>
-  <script type="module" crossorigin src="/domination/assets/index-C_XS_1oI.js"></script>
+  <script type="module" crossorigin src="/domination/assets/index-BxdfHaHi.js"></script>
 </head>
 <body>
   <div id="frame">
@@ -121,6 +133,16 @@
             <span class="url" id="joinUrl"></span>
             <span>HOLD THE SCREEN. THE LOSER FEELS IT BUZZ.</span>
           </div>
+        </div>
+        <div id="rules">
+          <b>THE RULES OF DOMINATION</b>
+          <span class="q">As played at the casino table, 1983. "Unlike armies, the players feel the pain."</span>
+          <p><i>THE TARGETS</i> — zones light up on the country. Strike them with your laser: aim with the mouse (or right stick), click to fire. Most strikes when the clock dies takes the country.</p>
+          <p><i>THE MISSILES</i> — you hold two nuclear missiles: press 1 or 2 (or A on a pad). An unblocked missile ends the round at once.</p>
+          <p><i>THE SHIELD</i> — your left hand guards the base: A / D (or left stick) swings the arc. When MISSILE INBOUND flashes, move it or lose.</p>
+          <p><i>THE PAIN</i> — the loser of every round is punished through the grips, harder as the stakes rise. HOLD SPACE (or pad triggers, or a phone grip station on the home table) and endure — release, and you forfeit everything. The buzz comes through a gamepad or phone grip; without one you'll feel it only in the screen.</p>
+          <p><i>THE LADDER</i> — $9,000 → $16,000 → $42,000 → the rest of the world, $325,000.</p>
+          <span class="q">PRESS ANY KEY</span>
         </div>
         <div id="shockFlash"></div>
         <div id="scanfx"></div>

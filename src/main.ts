@@ -161,6 +161,17 @@ function sendInputWindow(target: number): void {
 
 let gripInfoOk = false;
 let ledgerText: string | null = null;
+let rulesOpen = false;
+
+function setRules(open: boolean): void {
+  rulesOpen = open;
+  $('rules').style.display = open ? 'block' : 'none';
+  if (!open) {
+    try {
+      localStorage.setItem('dom.seenRules', '1');
+    } catch {}
+  }
+}
 
 // Player identity — arcade name entry, persisted. Sign-in can layer on later.
 let playerName: string = (() => {
@@ -328,7 +339,7 @@ function endRound(loser: Side, reason: DuelState['reason']): void {
   sendShock(loser, roundIdx, 3000);
   ui.center.textContent =
     loser === my() ? `${r.name} FALLS TO ${oppName()}` : `${r.name} IS YOURS`;
-  ui.sub.textContent = loser === my() ? 'HOLD [SPACE] — ENDURE THE PAIN' : '';
+  ui.sub.textContent = loser === my() ? 'HOLD [SPACE] OR YOUR GRIPS — ENDURE THE PAIN' : '';
   ui.taunt.textContent = mp
     ? ''
     : loser === 'p'
@@ -392,6 +403,11 @@ function tick(dt: number): void {
   switch (phase) {
     case 'attract': {
       startTitleMusic(); // no-op until the audio context exists (first interaction)
+      // The rules card swallows every key while open.
+      if (rulesOpen) {
+        if (pressSeq.length > 0) setRules(false);
+        break;
+      }
       if (attractMode === 'title') {
         setTxt(ui.center, ledgerText ?? 'DOMINATION');
         setTxt(
@@ -411,7 +427,7 @@ function tick(dt: number): void {
         setTxt(ui.taunt, '');
         setTxt(
           ui.help,
-          `ENTER: VS LARGO · O: HOST · J: JOIN · N: NAME (${playerName}) · G: ${
+          `ENTER: VS LARGO · H: HOW TO PLAY · O: HOST · J: JOIN · N: NAME (${playerName}) · G: ${
             signedIn() ? 'SIGNED IN ◉' : 'SIGN IN'
           } · L: LEDGER · M: MUTE · C: CRT · LINK: ${netMode() === 'supabase' ? 'GLOBAL ◉' : 'LOCAL RELAY'}`,
         );
@@ -481,6 +497,16 @@ function tick(dt: number): void {
         break;
       }
 
+      if (pressed('h')) {
+        if (attractMode === 'demo') {
+          demo = null;
+          attractMode = 'title';
+          showAttract(true);
+          setPhase('attract');
+        }
+        setRules(true);
+        break;
+      }
       if (pressed('g')) {
         if (signedIn()) signOut();
         else signInGoogle();
@@ -638,7 +664,10 @@ function tick(dt: number): void {
       }
       if (warnT > 0) {
         warnT -= SIM_DT;
-        setTxt(ui.center, warnT > 0 ? 'MISSILE INBOUND' : '');
+        setTxt(
+          ui.center,
+          warnT > 0 ? (roundIdx === 0 && !mp ? 'MISSILE INBOUND\nA/D — SWING YOUR SHIELD' : 'MISSILE INBOUND') : '',
+        );
       }
 
       if (!mp && !quipShown && duel.time > 18 && warnT <= 0) {
@@ -819,6 +848,11 @@ fmtCash();
 
 // Grip-station join QR for the title screen — dev server only (the relay and
 // grip.html don't exist on the published build).
+// First visit: show the rules of the table before anything else.
+try {
+  if (!localStorage.getItem('dom.seenRules')) setRules(true);
+} catch {}
+
 fetch('/grip-info')
   .then((r) => (r.ok ? r.json() : Promise.reject(new Error('no relay'))))
   .then((info: { ip: string; port: number }) => {
