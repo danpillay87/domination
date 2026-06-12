@@ -18,15 +18,16 @@ export class Largo {
     const out: SideInputs = { shieldDir: 0, fireAt: null, launch: false };
 
     // Laser: react to targets that have lived past his reaction time.
-    const reaction = Math.max(0.35, 0.75 - this.roundIdx * 0.08);
-    const accuracy = 0.5 + this.roundIdx * 0.11;
+    // Beatable on Spain, frightening by the world round.
+    const reaction = Math.max(0.5, 1.15 - this.roundIdx * 0.18);
+    const accuracy = 0.3 + this.roundIdx * 0.16;
     if (s.time > this.nextFire) {
       const t = s.targets.find((t) => t.age > reaction);
       if (t) {
         const err = this.rng() < accuracy ? 0 : 0.13 + this.rng() * 0.08;
         const a = this.rng() * Math.PI * 2;
         out.fireAt = { x: t.x + Math.cos(a) * err, y: t.y + Math.sin(a) * err };
-        this.nextFire = s.time + Math.max(0.55, 1.5 - this.roundIdx * 0.18) + this.rng() * 0.4;
+        this.nextFire = s.time + Math.max(0.9, 2.2 - this.roundIdx * 0.35) + this.rng() * 0.5;
       }
     }
 
@@ -44,7 +45,7 @@ export class Largo {
       for (const m of inbound) if (m.t > bestT) { best = m; bestT = m.t; }
       const want = angleFrom('l', best.x, best.y);
       const diff = want - s.shield.l;
-      const lag = 0.18 - this.roundIdx * 0.03; // smaller = sharper
+      const lag = 0.32 - this.roundIdx * 0.06; // smaller = sharper
       if (Math.abs(diff) > lag) out.shieldDir = Math.sign(diff);
     }
 

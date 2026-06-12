@@ -82,7 +82,55 @@ export const sfx = {
     setTimeout(() => env(659, 'triangle', 0.14, 0.1), 140);
     setTimeout(() => env(784, 'triangle', 0.3, 0.1), 280);
   },
+  tick: () => env(980, 'triangle', 0.05, 0.06),
+  warn: () => {
+    env(520, 'triangle', 0.1, 0.09);
+    setTimeout(() => env(520, 'triangle', 0.1, 0.09), 130);
+  },
 };
+
+function hat(): void {
+  if (!ctx || !master) return;
+  const t = ctx.currentTime;
+  const buf = ctx.createBuffer(1, ctx.sampleRate * 0.03, ctx.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length);
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  const f = ctx.createBiquadFilter();
+  f.type = 'highpass';
+  f.frequency.value = 6000;
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(0.03, t + 0.004);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + 0.03);
+  src.connect(f).connect(g).connect(master);
+  src.start(t);
+}
+
+// Original 8-step bass figure, transposed up a semitone per ladder rung,
+// tempo creeping up with the stakes.
+const PATTERN = [0, 0, 7, 0, 3, 0, 5, -2];
+let musicTimer: number | null = null;
+
+export function startMusic(round: number): void {
+  stopMusic();
+  if (!ctx) return;
+  const root = 110 * Math.pow(2, round / 12);
+  const stepMs = 60000 / (96 + round * 10) / 2;
+  let stepIdx = 0;
+  musicTimer = window.setInterval(() => {
+    const st = PATTERN[stepIdx % 8];
+    env(root * Math.pow(2, st / 12), 'triangle', 0.18, 0.09, undefined, 700);
+    if (stepIdx % 2 === 1) hat();
+    stepIdx++;
+  }, stepMs);
+}
+
+export function stopMusic(): void {
+  if (musicTimer !== null) window.clearInterval(musicTimer);
+  musicTimer = null;
+}
 
 export function startDrone(round: number): void {
   stopDrone();

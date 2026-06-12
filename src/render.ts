@@ -35,6 +35,16 @@ let globe: THREE.Group;
 let shakeT = 0;
 let shakeMag = 0;
 let aspect = 1.5;
+let introP: number | null = null;
+
+function easeOutCubic(x: number): number {
+  return 1 - Math.pow(1 - x, 3);
+}
+
+// Round intro: the world recedes as the target country resolves out of it.
+export function setIntro(p: number | null): void {
+  introP = p;
+}
 
 const CRTShader = {
   uniforms: {
@@ -198,6 +208,18 @@ export function buildRound(outline: [number, number][]): void {
 
 export function drawFrame(s: DuelState | null, reticle: { x: number; y: number } | null, dt: number): void {
   crtPass.uniforms.time.value += dt;
+
+  if (introP !== null) {
+    // Zoom past the globe while the country resolves to full size.
+    attractGroup.visible = introP < 0.62;
+    globe.scale.setScalar(1 + introP * 2.2);
+    duelGroup.visible = true;
+    const e = easeOutCubic(Math.min(1, introP * 1.25));
+    duelGroup.scale.setScalar(0.18 + 0.82 * e);
+  } else if (duelGroup.visible) {
+    duelGroup.scale.setScalar(1);
+    globe.scale.setScalar(1);
+  }
 
   if (attractGroup.visible) {
     globe.rotation.y += dt * 0.45;

@@ -6,10 +6,11 @@ import {
 } from './sim';
 import { Largo, TAUNTS, pick } from './ai';
 import {
-  initRender, showAttract, buildRound, drawFrame, ndcToWorld, shake, resize,
+  initRender, showAttract, buildRound, drawFrame, ndcToWorld, shake, resize, setIntro,
 } from './render';
 import {
   initAudio, sfx, startDrone, stopDrone, startAlarm, stopAlarm, announce,
+  startMusic, stopMusic,
 } from './audio';
 
 type Phase = 'attract' | 'intro' | 'duel' | 'shock' | 'over';
@@ -47,6 +48,9 @@ let shock: {
   rumbleAt: number;
 } | null = null;
 let matchWon = false;
+let warnT = 0; // "missile inbound" banner countdown
+let prevLargoAmmo = 2;
+let lastBeepSecond = -1;
 
 function pressed(k: string): boolean {
   return keys.has(k) && !prevKeys.has(k);
@@ -86,18 +90,25 @@ function startRound(): void {
     roundIdx === 0 ? pick(TAUNTS.intro, rng) : roundIdx === 3 ? TAUNTS.finalRound[0] : '';
   ui.help.textContent = 'MOUSE: AIM+FIRE LASER · A/D: SHIELD · 1,2: MISSILES · NEVER RELEASE THE GRIPS';
   announce(`${r.name}. ${r.stake.toLocaleString('en-US')} dollars.`);
+  warnT = 0;
+  prevLargoAmmo = 2;
+  lastBeepSecond = -1;
+  setIntro(0);
   setPhase('intro');
 }
 
 function beginDuel(): void {
   ui.center.textContent = '';
   ui.sub.textContent = '';
+  setIntro(null);
   startDrone(roundIdx);
+  startMusic(roundIdx);
   setPhase('duel');
 }
 
 function endRound(loser: Side, reason: DuelState['reason']): void {
   stopDrone();
+  stopMusic();
   const r = ROUNDS[roundIdx];
   const winner: Side = loser === 'p' ? 'l' : 'p';
 
@@ -119,7 +130,9 @@ function endRound(loser: Side, reason: DuelState['reason']): void {
     outcome: null,
     rumbleAt: 0,
   };
-  ui.center.textContent = loser === 'p' ? 'YOU LOSE THE ROUND' : 'LARGO LOSES THE ROUND';
+  ui.flash.style.background = loser === 'p' ? '#ff2200' : '#ff7a00';
+  ui.center.textContent =
+    loser === 'p' ? `${r.name} FALLS TO LARGO` : `${r.name} IS YOURS`;
   ui.sub.textContent = loser === 'p' ? 'HOLD [SPACE] — ENDURE THE PAIN' : '';
   ui.taunt.textContent =
     loser === 'p' ? pick(TAUNTS.playerShock, rng) : pick(TAUNTS.largoShock, rng);
@@ -129,6 +142,7 @@ function endRound(loser: Side, reason: DuelState['reason']): void {
 
 function finishMatch(won: boolean, headline: string): void {
   stopDrone();
+  stopMusic();
   stopAlarm();
   ui.flash.style.opacity = '0';
   matchWon = won;
@@ -171,6 +185,7 @@ function tick(dt: number): void {
       break;
     }
     case 'intro': {
+      setIntro(Math.min(1, phaseT / 3));
       if (phaseT > 3.0 || pressed('enter')) beginDuel();
       break;
     }
@@ -199,11 +214,28 @@ function tick(dt: number): void {
         }
       }
 
+      // Largo launched — warn the defender.
+      if (duel.ammo.l < prevLargoAmmo) {
+        prevLargoAmmo = duel.ammo.l;
+        warnT = 1.4;
+        sfx.warn();
+      }
+      if (warnT > 0) {
+        warnT -= SIM_DT;
+        ui.center.textContent = 'MISSILE INBOUND';
+        if (warnT <= 0) ui.center.textContent = '';
+      }
+
       const left = Math.max(0, duel.duration - duel.time);
+      if (left <= 5.4 && Math.floor(left) !== lastBeepSecond) {
+        lastBeepSecond = Math.floor(left);
+        sfx.tick();
+      }
       const ammo = '▲'.repeat(duel.ammo.p) + '△'.repeat(2 - duel.ammo.p);
+      const ammoL = '▲'.repeat(duel.ammo.l) + '△'.repeat(2 - duel.ammo.l);
       ui.marquee.innerHTML =
         `${r.name} — ${dollars(r.stake)}` +
-        `<span class="stake">007 ${duel.strikes.p} — ${duel.strikes.l} LARGO · ${left.toFixed(0)}s · ${ammo}</span>`;
+        `<span class="stake">${ammo} 007 ${duel.strikes.p} — ${duel.strikes.l} LARGO ${ammoL} · ${left.toFixed(0)}s</span>`;
 
       if (duel.over && duel.loser) endRound(duel.loser, duel.reason);
       break;
@@ -274,7 +306,7 @@ function pump(now: number): void {
     acc -= SIM_DT;
   }
   const reticle = phase === 'duel' ? ndcToWorld(mouse.x, mouse.y) : null;
-  drawFrame(phase === 'duel' || phase === 'shock' ? duel : null, reticle, dt);
+  drawFrame(phase === 'duel' || phase === 'shock' || phase === 'intro' ? duel : null, reticle, dt);
 }
 function frame(now: number): void {
   pump(now);
